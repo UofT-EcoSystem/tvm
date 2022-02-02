@@ -81,6 +81,7 @@ class BoundDeducer : public ExprVisitor {
       : target_(target), expr_(expr), hint_map_(hint_map), relax_map_(relax_map) {}
 
   void Deduce();
+  void DeduceRelaxedPredicate();
 
   void VisitExpr(const PrimExpr& e) final {
     if (!success_) return;
@@ -166,7 +167,13 @@ class BoundDeducer : public ExprVisitor {
     this->VisitExpr(left ? op->a : op->b);
   }
 
+ private:
+  PrimExpr target_;
+
+ public:
+  PrimExpr expr_;
   PrimExpr result_;
+  PrimExpr relaxed_predicate;
   CompareOp comp_op{kGreater};
   bool success_{true};
 
@@ -175,8 +182,6 @@ class BoundDeducer : public ExprVisitor {
   void Transform();
   void Relax();
   CompareOp ReverseOp(CompareOp comp_op);
-  PrimExpr target_;
-  PrimExpr expr_;
   const std::unordered_map<const VarNode*, IntSet>& hint_map_;
   const std::unordered_map<const VarNode*, IntSet>& relax_map_;
   ExprIntSetMap expr_map_;
@@ -304,6 +309,14 @@ void BoundDeducer::Deduce() {
   this->VisitExpr(expr_);
 }
 
+void BoundDeducer::DeduceRelaxedPredicate() {
+  // do the same initialization and relaxation as before
+  Init();
+  if (!success_) return;
+  Relax();
+  if (!success_) return;
+}
+
 void BoundDeducer::Relax() {
   IntSet a = EvalSet(expr_, relax_map_);
   IntSet b = EvalSet(result_, relax_map_);
@@ -354,6 +367,30 @@ IntSet DeduceBound(PrimExpr v, PrimExpr e, const Map<Var, IntSet>& hint_map,
     rmap[kv.first.get()] = kv.second;
   }
   return DeduceBound(v, e, hmap, rmap);
+}
+
+// <DietCode>
+//
+// Please refer to the comments in `tir/transforms/loop_partition.cc` as of why
+// this function is needed.
+PrimExpr DeduceRelaxedPredicate(
+    Var var, PrimExpr predicate,
+    const std::unordered_map<const VarNode*, IntSet>& hint_map,
+    const std::unordered_map<const VarNode*, IntSet>& relax_map
+) {
+  BoundDeducer d(var, predicate, hint_map, relax_map);
+  d.DeduceRelaxedPredicate();
+  if (!d.success_) {
+    return PrimExpr();
+  }
+  Analyzer analyzer;
+  if (d.comp_op == kGreater) {
+    return analyzer.Simplify(d.expr_ > d.result_);
+  } else if (d.comp_op == kLess) {
+    return analyzer.Simplify(d.expr_ < d.result_);
+  }
+  // if (d.comp_op == kEqual)
+  return analyzer.Simplify(d.expr_ == d.result_);
 }
 
 TVM_REGISTER_GLOBAL("arith.DeduceBound")

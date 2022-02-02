@@ -20,6 +20,7 @@
 /*!
  * \file loop_partition.cc
  */
+#include <dmlc/parameter.h>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/bound.h>
 #include <tvm/runtime/registry.h>
@@ -29,6 +30,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <regex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -82,6 +84,69 @@ struct PartitionKeyEqual {
 // Each mapping (cond, cond_value) -> interval represents the fact that
 // condition cond is proven to have value cond_value (true or false) in interval.
 using Partition = std::unordered_map<PartitionKey, IntSet, PartitionKeyHash, PartitionKeyEqual>;
+
+}  // namespace tir
+
+// <DietCode>
+//
+// The original implementation only allows for partitions of integral regions,
+// which can be limited as it cannot handle certain operators such as %, which
+// has striped partitions.
+//
+// Therefore, to make the implementation more generic, we introduce
+// `RelaxedPartition`s, which, instead of deducing integral regions, derives
+// predicates of the target variable by relaxing other variables.
+namespace arith {
+
+/**
+ * @brief Deduce a predicate on `var` by relaxing all the variables other than
+ *        `var` in `predicate` (using the hints provided by `hint_map` and
+ *        `relax_map`). This is in essence similar to the `arith::DeduceBound`
+ *        function call. Both are defined in `arith/bound_deducer.cc`.
+ *
+ * @param var        the target variable
+ * @param predicate  the original predicate from the program
+ * @param hint_map   the domain of each variable
+ * @param relax_map  ditto
+ *
+ * @return the relaxed predicate
+ */
+extern PrimExpr DeduceRelaxedPredicate(
+    Var var, PrimExpr predicate,
+    const std::unordered_map<const VarNode*, IntSet>& hint_map,
+    const std::unordered_map<const VarNode*, IntSet>& relax_map
+);
+
+}  // namespace
+
+namespace tir {
+
+using RelaxedPartition =
+    std::unordered_map<PartitionKey, PrimExpr, PartitionKeyHash, PartitionKeyEqual>;
+
+struct PrimExprStrHash {
+  std::size_t operator()(const PrimExpr& k) const {
+    std::ostringstream strout;
+    strout << k;
+    return std::hash<std::string>()(strout.str());
+  }
+};
+
+struct PrimExprStrEqual {
+  bool operator()(const PrimExpr& lhs, const PrimExpr& rhs) const {
+    std::ostringstream lhs_strout, rhs_strout;
+    lhs_strout << lhs;
+    rhs_strout << rhs;
+    return lhs_strout.str() == rhs_strout.str();
+  }
+};
+
+using PartitionKeySet =
+    std::unordered_set<PartitionKey, PartitionKeyHash, PartitionKeyEqual>;
+using RelaxedPartitionReverseMap =
+    std::unordered_map<PrimExpr, PartitionKeySet, PrimExprStrHash,
+                       PrimExprStrEqual>;
+
 
 using ExpressionSet = std::unordered_set<PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
 
@@ -201,7 +266,7 @@ class PartitionFinder : public StmtExprVisitor {
 
   void VisitStmt_(const AttrStmtNode* op) final {
     // handle thread_axis
-    if (op->attr_key == attr::thread_extent) {
+    if (op->attr_key == attr::thread_extent || op->attr_key == attr::virtual_thread) {
       const IterVarNode* thread_axis = op->node.as<IterVarNode>();
       ICHECK(thread_axis);
       const VarNode* var = thread_axis->var.get();
@@ -216,6 +281,29 @@ class PartitionFinder : public StmtExprVisitor {
     }
   }
 
+  void VisitStmt_(const IfThenElseNode* op) final {
+    PrimExpr cond = op->condition;
+
+    if (const CallNode* const call_op = cond.as<CallNode>()) {
+      if (call_op->op.same_as(builtin::likely())) {
+        cond = call_op->args[0];
+      }
+    }
+    if (const LTNode* const lt_op = cond.as<LTNode>()) {
+      if (const VarNode* const var = lt_op->a.as<VarNode>()) {
+        std::unordered_map<const VarNode*, IntSet>::iterator relax_map_it = relax_map_.find(var);
+        if (relax_map_it != relax_map_.end()) {
+          IntSet orig_bound = relax_map_it->second;
+          relax_map_it->second = IntSet::Interval(orig_bound.min(), lt_op->b);
+          StmtExprVisitor::VisitStmt(op->then_case);
+          relax_map_it->second = orig_bound;
+          return;
+        }
+      }
+    }
+    return StmtExprVisitor::VisitStmt_(op);
+  }
+
   void VisitExpr_(const CallNode* op) final {
     if (op->op.same_as(builtin::likely())) {
       PrimExpr cond = op->args[0];
@@ -227,6 +315,12 @@ class PartitionFinder : public StmtExprVisitor {
         if (!interval.IsNothing()) {
           // cond is true within interval
           partitions[{cond, true}] = interval;
+        } else {
+          PrimExpr pred =
+              DeduceRelaxedPredicate(current_var_, cond, hint_map_, relax_map_);
+          if (pred.defined()) {
+            relaxed_partitions[{cond, true}] = pred;
+          }
         }
         PrimExpr inverse_cond = InverseCond(cond);
         if (inverse_cond.defined()) {
@@ -234,6 +328,12 @@ class PartitionFinder : public StmtExprVisitor {
           if (!interval.IsNothing()) {
             // cond is false within interval
             partitions[{cond, false}] = interval;
+          } else {
+            PrimExpr pred =
+                DeduceRelaxedPredicate(current_var_, cond, hint_map_, relax_map_);
+            if (pred.defined()) {
+              relaxed_partitions[{cond, false}] = pred;
+            }
           }
         }
       }
@@ -243,6 +343,7 @@ class PartitionFinder : public StmtExprVisitor {
   }
 
   Partition partitions;
+  RelaxedPartition relaxed_partitions;
 
  private:
   PrimExpr InverseCond(const PrimExpr& cond) {
@@ -361,7 +462,10 @@ class LoopPartitioner : public StmtMutator {
     Var var = iv->var;
     auto as = GetRef<Stmt>(op);
     if (selector.candidates.count(as)) {
-      Stmt s = TryPartition(as, var, 0, op->value - 1, op->body, true);
+      // try optimizing for the inner body first
+      Stmt new_as_body = Downcast<AttrStmt>(StmtMutator::VisitStmt(op->body));
+      AttrStmt new_as = AttrStmt(op->node, op->attr_key, op->value, new_as_body);
+      Stmt s = TryPartition(new_as, var, 0, op->value - 1, new_as_body, true);
       if (s.defined()) return s;
     }
 
@@ -420,6 +524,131 @@ std::pair<IntSet, ExpressionSet> LoopPartitioner::GetIntervalAndCondset(
   return std::make_pair(interval, cond_set);
 }
 
+// <DietCode>
+//
+// Eliminator & Simplifier
+//
+// Whenever a loop partition happens, the entire loop is divided into two
+// regions: one where the predicates are eliminated and the other where the
+// predicates cannot but can be further simplified.
+namespace {
+class PredicateEliminator : public StmtExprMutator {
+ public:
+  PredicateEliminator(const std::pair<PrimExpr, PartitionKeySet>& relaxed_partition)
+      : relaxed_partition_(relaxed_partition) {}
+ private:
+  PrimExpr VisitExpr_(const CallNode* op) final {
+    if (op->op.same_as(builtin::likely())) {
+      PrimExpr cond = op->args[0];
+
+      if (relaxed_partition_.second.find(PartitionKey{cond, true}) !=
+          relaxed_partition_.second.end()) {
+        return Bool(true);
+      }
+      if (relaxed_partition_.second.find(PartitionKey{cond, false}) !=
+          relaxed_partition_.second.end()) {
+        return Bool(false);
+      }
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+  std::pair<PrimExpr, PartitionKeySet> relaxed_partition_;
+};
+
+class PredicateSimplifier : public StmtExprMutator {
+ public:
+  PredicateSimplifier(const std::pair<PrimExpr, PartitionKeySet>& relaxed_partition)
+      : relaxed_partition_(relaxed_partition) {
+    if (const LTNode* const op = relaxed_partition.first.as<LTNode>()) {
+      expr_   = op->a;
+      result_ = op->b;
+    }
+    if (const GTNode* const op = relaxed_partition.first.as<GTNode>()) {
+      expr_   = op->a;
+      result_ = op->b;
+    }
+  }
+ private:
+  PrimExpr VisitExpr(const PrimExpr& e) final {
+    if (!simplify_predicate_ || !expr_.defined() || !result_.defined()) {
+      return StmtExprMutator::VisitExpr(e);
+    }
+    if (PrimExprStrEqual()(e, expr_)) {
+      return result_;
+    }
+    return StmtExprMutator::VisitExpr(e);
+  }
+
+  PrimExpr VisitExpr_(const CallNode* op) final {
+    if (op->op.same_as(builtin::likely())) {
+      PrimExpr cond = op->args[0];
+      if (relaxed_partition_.second.find(PartitionKey{cond, true}) !=
+          relaxed_partition_.second.end()) {
+        simplify_predicate_ = true;
+        PrimExpr simplified_cond = VisitExpr(cond);
+        simplify_predicate_ = false;
+        return likely(simplified_cond);
+      }
+      if (relaxed_partition_.second.find(PartitionKey{cond, false}) !=
+          relaxed_partition_.second.end()) {
+        simplify_predicate_ = true;
+        PrimExpr simplified_cond = VisitExpr(cond);
+        simplify_predicate_ = false;
+        return likely(simplified_cond);
+      }
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+  std::pair<PrimExpr, PartitionKeySet> relaxed_partition_;
+  PrimExpr expr_, result_;
+  bool simplify_predicate_ = false;
+};
+
+// <DietCode>
+//
+// CUDA Header Stripper & Adder
+//
+// In the case when the loop to partition is blockIdx.x, strip the CUDA kernel
+// header up until to the register allocations (which also includes the
+// blockIdx.x, vthread, and threadIdx.x attributes). This is to avoid the header
+// being duplicated in each partitioned region.
+class CUDAKernelHeaderStripper : public StmtExprVisitor {
+ public:
+  Stmt kernel_body;
+ 
+ private:
+  void VisitStmt_(const AllocateNode* op) final {
+    std::string var_name = op->buffer_var->name_hint;
+    if (std::regex_match(std::string(op->buffer_var->name_hint),
+                         std::regex("(.*)[.]local"))) {
+      kernel_body = op->body;
+      return;
+    }
+    return StmtExprVisitor::VisitStmt_(op);
+  }
+};
+
+class CUDAKernelHeaderAdder : public StmtExprMutator {
+ public:
+  CUDAKernelHeaderAdder(const Stmt new_kernel_body)
+      : new_kernel_body_(new_kernel_body) {}
+
+ private:
+  Stmt VisitStmt_(const AllocateNode* op) final {
+    std::string var_name = op->buffer_var->name_hint;
+    if (std::regex_match(std::string(op->buffer_var->name_hint),
+                         std::regex("(.*)[.]local"))) {
+      return Allocate(op->buffer_var, op->dtype, op->extents, op->condition,
+                      new_kernel_body_);
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+  Stmt new_kernel_body_;
+};
+}  // anonymous namespace
+
 /*
  * Tries to recursively partition the range of the variable (given by var) of
  * the for loop (given by node and stmt) into a
@@ -468,6 +697,15 @@ std::pair<IntSet, ExpressionSet> LoopPartitioner::GetIntervalAndCondset(
  */
 Stmt LoopPartitioner::TryPartition(const Stmt& stmt, Var var, PrimExpr min, PrimExpr max, Stmt body,
                                    bool partition_thread_scope) {
+  // <DietCode>
+  //
+  // Do NOT partition inner loops as doing so would lead to incorrect program
+  // behaviors.
+  std::string var_name = var->name_hint;
+  if (var_name.find(".inner") != std::string::npos || var_name.find(".fused") != std::string::npos) {
+    return Stmt();
+  }
+
   using namespace arith;
   // include hint of var.
   hint_map_.insert({var.get(), IntSet::Interval(min, max)});
@@ -476,7 +714,59 @@ Stmt LoopPartitioner::TryPartition(const Stmt& stmt, Var var, PrimExpr min, Prim
   finder(body);
 
   hint_map_.erase(var.get());
-  if (finder.partitions.empty()) return Stmt();
+  if (finder.partitions.empty()) {
+
+    // If the partitions are empty, look into relaxed partitions.
+    if (!dmlc::GetEnv("DIETCODE_DO_LOOP_PARTITIONING", 0) ||
+        finder.relaxed_partitions.empty()) {
+      return Stmt();
+    }
+
+    Stmt body_stmt = stmt;
+    if (var->name_hint == "blockIdx.x") {
+      CUDAKernelHeaderStripper stripper;
+      stripper(stmt);
+      body_stmt = stripper.kernel_body;
+    }
+
+    // Merge predicates that are the same. Here we adopt a simple heuristic: two
+    // relaxed predicates are considered the same iff. their are printed the
+    // same (as can be seen from the implementation of RelaxedPredicateEqual).
+    RelaxedPartitionReverseMap relaxed_partitions_reserved_map;
+    for (const std::pair<PartitionKey, PrimExpr>& kv : finder.relaxed_partitions) {
+      relaxed_partitions_reserved_map[kv.second].insert(kv.first);
+    }
+
+    arith::Analyzer analyzer;
+    std::vector<PrimExpr> partitioned_regions;
+    // walkthrough the relaxed predicates to obtain the partitioned regions
+    std::function<Stmt(RelaxedPartitionReverseMap::iterator, const RelaxedPartitionReverseMap::iterator)>
+    relaxed_predicates_walkthru =
+        [&relaxed_predicates_walkthru, body_stmt](
+          RelaxedPartitionReverseMap::iterator iter,
+          const RelaxedPartitionReverseMap::iterator end_iter
+        ) -> Stmt {
+          RelaxedPartitionReverseMap::iterator curr = iter;
+          ++iter;
+          PredicateEliminator eliminator(*curr);
+          PredicateSimplifier simplifier(*curr);
+          if (iter == end_iter) {
+            return IfThenElse(curr->first, eliminator(body_stmt), simplifier(body_stmt));
+          }
+          Stmt child_body_stmt = relaxed_predicates_walkthru(iter, end_iter);
+          return IfThenElse(curr->first, eliminator(child_body_stmt),
+                            simplifier(child_body_stmt));
+        };
+
+    Stmt new_body_stmt =
+        relaxed_predicates_walkthru(relaxed_partitions_reserved_map.begin(),
+                                    relaxed_partitions_reserved_map.end());
+    if (var->name_hint == "blockIdx.x") {
+      CUDAKernelHeaderAdder adder(new_body_stmt);
+      return adder(stmt);
+    }
+    return new_body_stmt;
+  }
 
   arith::IntervalSet for_interval(min, max);
   bool cond_value;
@@ -629,8 +919,18 @@ Pass LoopPartition() {
     if (!cfg.defined()) {
       cfg = AttrsWithDefaultValues<LoopPartitionConfig>();
     }
-    n->body = LoopPartition(std::move(n->body), cfg.value()->partition_const_loop,
+
+    // <DietCode>
+    //
+    // Enable constant loop partitioning, which is turned off by default.
+    // However, note that simply enabling the optimization is not enough, as the
+    // current implementation of the LoopPartitioner give erroneous code that is
+    // even not runnable. Please refer to above for the changes that we made.
+    n->body = LoopPartition(std::move(n->body),
+                            cfg.value()->partition_const_loop ||
+                            dmlc::GetEnv("DIETCODE_DO_LOOP_PARTITIONING", 0),
                             cfg.value()->no_unroll_loop_with_extent_one);
+
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tir.LoopPartition", {});
