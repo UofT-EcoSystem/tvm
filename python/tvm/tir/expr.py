@@ -383,6 +383,14 @@ class SizeVar(Var):
         self.__init_handle_by_constructor__(_ffi_api.SizeVar, name, dtype, span)  # type: ignore
 
 
+# <DietCode>
+#
+# Dynamic Shape Variable
+class DynShapeVar(Var):
+    def __init__(self, name, span=None):
+        super.__init__(name, 'int32', span=span)
+
+
 @tvm._ffi.register_object("tir.IterVar")
 class IterVar(Object, ExprOp):
     """Represent iteration variable.
