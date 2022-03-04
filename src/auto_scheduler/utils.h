@@ -35,6 +35,7 @@
 #include <iomanip>
 #include <numeric>
 #include <random>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -149,11 +150,10 @@ inline bool IntArrayEqual(const Array<PrimExpr>& arr1, const Array<PrimExpr>& ar
   }
 
   for (size_t i = 0; i < arr1.size(); ++i) {
-    auto int1 = arr1[i].as<IntImmNode>();
-    auto int2 = arr2[i].as<IntImmNode>();
-    ICHECK(int1 != nullptr);
-    ICHECK(int2 != nullptr);
-    if (int1->value != int2->value) {
+    std::ostringstream lhs_strout, rhs_strout;
+    lhs_strout << arr1[i];
+    rhs_strout << arr2[i];
+    if (lhs_strout.str() != rhs_strout.str()) {
       return false;
     }
   }
