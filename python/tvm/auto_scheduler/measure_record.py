@@ -32,6 +32,8 @@ from . import _ffi_api
 
 logger = logging.getLogger("auto_scheduler")
 
+use_ansor_log_format = int(os.getenv('USE_ANSOR_LOG_FORMAT', '0'))
+
 
 @tvm._ffi.register_object("auto_scheduler.RecordToFile")
 class RecordToFile(MeasureCallback):

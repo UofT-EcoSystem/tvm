@@ -158,7 +158,10 @@ def make_workload_key(func, args):
 
     args = serialize_args(args)
 
-    return json.dumps((func_name,) + args)
+    # <DietCode>
+    #
+    # Switch to TVM builtin JSON methods (for support of DynShapeVar's).
+    return tvm.ir.save_json((func_name,) + args)
 
 
 @tvm._ffi.register_func("auto_scheduler.workload_key_to_tensors")
@@ -188,7 +191,7 @@ def workload_key_to_tensors(workload_key):
     # We register compute function with only the function name since
     # it does not bind to specific arguments, so we use the function name to query
     # the function and call the function with arguments to get the tensors.
-    workload = json.loads(workload_key)
+    workload = tvm.ir.load_json(workload_key)
     name = workload[0]
     value = WORKLOAD_FUNC_REGISTRY[name]
     assert callable(value)
@@ -219,7 +222,7 @@ def serialize_workload_registry_entry(workload_key):
     if workload_key in WORKLOAD_FUNC_REGISTRY:
         sname = workload_key
     else:
-        workload = json.loads(workload_key)
+        workload = tvm.ir.load_json(workload_key)
         sname = workload[0]
 
     svalue = WORKLOAD_FUNC_REGISTRY[sname]

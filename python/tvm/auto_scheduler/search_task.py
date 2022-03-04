@@ -405,6 +405,12 @@ class SearchTask(Object):
         tuning process.
     desc: str = ""
         The description string of this task.
+    shape_vars : List[tvm.tir.DynShapeVar]
+        Dynamic Shape Variables
+    wkl_insts : List[List[int]]
+        List of Workload Instances
+    wkl_inst_weights : List[float]
+        Weights Associated with Each Workload Instance
 
     Examples
     --------
@@ -436,6 +442,9 @@ class SearchTask(Object):
         task_inputs_overwrite=False,
         task_inputs_save_to_file=False,
         desc="",
+        shape_vars=None,
+        wkl_insts=None,
+        wkl_inst_weights=None
     ):
         assert (
             func is not None or workload_key is not None

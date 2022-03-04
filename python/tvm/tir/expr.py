@@ -388,7 +388,7 @@ class SizeVar(Var):
 # Dynamic Shape Variable
 class DynShapeVar(Var):
     def __init__(self, name, span=None):
-        super.__init__(name, 'int32', span=span)
+        super().__init__(name, 'int32', span=span)
 
 
 @tvm._ffi.register_object("tir.IterVar")
