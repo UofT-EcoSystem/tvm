@@ -1401,7 +1401,11 @@ void GetPerStoreFeaturesFromFile(const std::string& filename, int max_lines, int
       Target target_host = cur_inp->task->target_host;
       CheckAndUpdateHostConsistency(&target, &target_host);
       task = SearchTask(ComputeDAG(tensors), workload_key, target, target_host,
-                        cur_inp->task->hardware_params, cur_inp->task->layout_rewrite_option,
+                        cur_inp->task->hardware_params,
+                        cur_inp->task->shape_vars,
+                        cur_inp->task->wkl_insts,
+                        cur_inp->task->wkl_inst_weights,
+                        cur_inp->task->layout_rewrite_option,
                         cur_inp->task->task_input_names);
       task_id = task_cache.size();
 
@@ -1474,7 +1478,11 @@ void GetPerStoreFeaturesFromMeasurePairs(const Array<MeasureInput>& inputs,
           CheckAndUpdateHostConsistency(&target, &target_host);
           task =
               SearchTask(ComputeDAG(tensors), workload_key, target, target_host,
-                         inputs[i]->task->hardware_params, inputs[i]->task->layout_rewrite_option,
+                         inputs[i]->task->hardware_params,
+                         inputs[i]->task->shape_vars,
+                         inputs[i]->task->wkl_insts,
+                         inputs[i]->task->wkl_inst_weights,
+                         inputs[i]->task->layout_rewrite_option,
                          inputs[i]->task->task_input_names);
         } catch (std::exception& e) {
           // Cannot build ComputeDAG from workload key, the task may have not been registered in

@@ -81,6 +81,21 @@ SketchPolicy::SketchPolicy(SearchTask task, CostModel program_cost_model,
   node->sample_init_min_pop_ =
       GetIntParam(node->params, SketchParamKey::SampleInitPopulation::min_population);
 
+  // <DietCode>
+  //
+  // Initialize the factorization cache.
+  int max_innermost_split_factor =
+      GetIntParam(node->params, SketchParamKey::max_innermost_split_factor);
+  if (IsDynTask(node->search_task)) {
+    if (!IsGPUTask(node->search_task)) {
+      LOG(FATAL) << "Non-GPU dynamic tasks have not been supported";
+    }
+    node->dietcode_split_memo =
+        DietCodeSplitFactorizationMemo(node->search_task->hardware_params,
+                                       max_innermost_split_factor);
+  }
+  node->split_memo = SplitFactorizationMemo(max_innermost_split_factor);
+
   if (init_search_callbacks) {
     PrintTitle("Call init-search callbacks", verbose);
     // Candidates:

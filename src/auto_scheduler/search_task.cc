@@ -136,9 +136,14 @@ HardwareParams HardwareParamsNode::GetDefaultHardwareParams(const Target& target
   return HardwareParams();
 }
 
-SearchTask::SearchTask(ComputeDAG compute_dag, String workload_key, Target target,
-                       Target target_host, Optional<HardwareParams> hardware_params,
-                       LayoutRewriteOption layout_rewrite_option, Array<String> task_input_names,
+SearchTask::SearchTask(ComputeDAG compute_dag, String workload_key,
+                       Target target, Target target_host,
+                       Optional<HardwareParams> hardware_params,
+                       Optional<Array<Var>> shape_vars,
+                       Optional<Array<Array<IntImm>>> wkl_insts,
+                       Optional<Array<FloatImm>> wkl_inst_weights,
+                       LayoutRewriteOption layout_rewrite_option,
+                       Array<String> task_input_names,
                        String desc) {
   CheckAndUpdateHostConsistency(&target, &target_host);
   auto node = make_object<SearchTaskNode>();
@@ -147,6 +152,13 @@ SearchTask::SearchTask(ComputeDAG compute_dag, String workload_key, Target targe
   node->desc = std::move(desc);
   node->target = std::move(target);
   node->target_host = std::move(target_host);
+  node->shape_vars = std::move(shape_vars);
+  if (shape_vars) {
+    CHECK(wkl_insts);
+    CHECK(wkl_inst_weights);
+    node->wkl_insts = wkl_insts.value();
+    node->wkl_inst_weights = wkl_inst_weights.value();
+  }
   if (hardware_params) {
     node->hardware_params = hardware_params.value();
   } else {
@@ -173,11 +185,17 @@ TVM_REGISTER_GLOBAL("auto_scheduler.GetDefaultHardwareParams")
     });
 
 TVM_REGISTER_GLOBAL("auto_scheduler.SearchTask")
-    .set_body_typed([](ComputeDAG compute_dag, String workload_key, Target target,
-                       Target target_host, Optional<HardwareParams> hardware_params,
-                       int layout_rewrite_option, Array<String> task_input_names, String desc) {
+    .set_body_typed([](ComputeDAG compute_dag, String workload_key,
+                       Target target, Target target_host,
+                       Optional<HardwareParams> hardware_params,
+                       Optional<Array<Var>> shape_vars,
+                       Optional<Array<Array<IntImm>>> wkl_insts,
+                       Optional<Array<FloatImm>> wkl_inst_weights,
+                       int layout_rewrite_option, Array<String> task_input_names,
+                       String desc) {
       CheckAndUpdateHostConsistency(&target, &target_host);
       return SearchTask(compute_dag, workload_key, target, target_host, hardware_params,
+                        shape_vars, wkl_insts, wkl_inst_weights,
                         LayoutRewriteOption(layout_rewrite_option), task_input_names, desc);
     });
 

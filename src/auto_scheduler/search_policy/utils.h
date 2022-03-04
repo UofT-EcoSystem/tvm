@@ -46,6 +46,15 @@
 namespace tvm {
 namespace auto_scheduler {
 
+// <DietCode>
+//
+/**
+ * @brief Check whether the task involves dynamic shape variables.
+ */
+inline bool IsDynTask(const SearchTask& task) {
+  return task->shape_vars != nullptr;
+}
+
 /*! \brief Return whether the search task is targeting a CPU. */
 inline bool IsCPUTask(const SearchTask& task) {
   return (task)->target->kind->device_type == kDLCPU;

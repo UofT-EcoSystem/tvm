@@ -121,6 +121,12 @@ class SearchTaskNode : public Object {
   Target target_host;
   /*! \brief Hardware parameters used in this search task. */
   HardwareParams hardware_params;
+  /*! \brief The dynamic shape variables in the search task. */
+  Optional<Array<Var>> shape_vars;
+  /*! \brief The possible workload instances. */
+  Array<Array<IntImm>> wkl_insts;
+  /*! \brief The weights associated with each workload instance. */
+  Array<FloatImm> wkl_inst_weights;
   /*! \brief The layout rewrite option used for measuring programs. */
   LayoutRewriteOption layout_rewrite_option;
   /*! \brief Names of some user defined input data used in program measuring. */
@@ -154,13 +160,22 @@ class SearchTask : public ObjectRef {
    * \param target The target device of this search task.
    * \param target_host The target host device of this search task.
    * \param hardware_params Hardware parameters used in this search task.
+   * \param shape_vars The dynamic shape variables in the search task.
+   * \param wkl_insts The possible workload instances.
+   * \param wkl_inst_weights The weights associated with each workload instance.
    * \param layout_rewrite_option The layout rewrite option used for measuring programs.
    * \param task_input_names Names of some user defined input data used in program measuring.
    * \param desc The description string of this task.
    */
-  SearchTask(ComputeDAG compute_dag, String workload_key, Target target, Target target_host,
-             Optional<HardwareParams> hardware_params, LayoutRewriteOption layout_rewrite_option,
-             Array<String> task_input_names, String desc = "");
+  SearchTask(ComputeDAG compute_dag, String workload_key,
+             Target target, Target target_host,
+             Optional<HardwareParams> hardware_params,
+             Optional<Array<Var>> shape_vars,
+             Optional<Array<Array<IntImm>>> wkl_insts,
+             Optional<Array<FloatImm>> wkl_inst_weights,
+             LayoutRewriteOption layout_rewrite_option,
+             Array<String> task_input_names,
+             String desc = "");
 
   TVM_DEFINE_OBJECT_REF_METHODS(SearchTask, ObjectRef, SearchTaskNode);
 };
