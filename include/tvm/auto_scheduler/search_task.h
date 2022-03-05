@@ -121,12 +121,16 @@ class SearchTaskNode : public Object {
   Target target_host;
   /*! \brief Hardware parameters used in this search task. */
   HardwareParams hardware_params;
+
+  // <DietCode>
+  //
   /*! \brief The dynamic shape variables in the search task. */
   Optional<Array<Var>> shape_vars;
   /*! \brief The possible workload instances. */
   Array<Array<IntImm>> wkl_insts;
   /*! \brief The weights associated with each workload instance. */
   Array<FloatImm> wkl_inst_weights;
+
   /*! \brief The layout rewrite option used for measuring programs. */
   LayoutRewriteOption layout_rewrite_option;
   /*! \brief Names of some user defined input data used in program measuring. */

@@ -26,6 +26,7 @@
 #include <tvm/auto_scheduler/loop_state.h>
 #include <tvm/auto_scheduler/measure_record.h>
 #include <tvm/auto_scheduler/transform_step.h>
+#include <tvm/node/serialization.h>
 #include <tvm/runtime/registry.h>
 
 #include <fstream>
@@ -35,6 +36,14 @@
 #include <vector>
 
 #include "utils.h"
+
+using ::tvm::runtime::Array;
+using ::tvm::runtime::Downcast;
+using ::tvm::FloatImm;
+using ::tvm::IntImm;
+using ::tvm::LoadJSON;
+using ::tvm::SaveJSON;
+using ::tvm::tir::Var;
 
 // Json serialization handler for MeasureInput, MeasureResult
 // (and recursively for SearchTask, State, Step, ...)
@@ -171,6 +180,17 @@ struct Handler<::tvm::auto_scheduler::SearchTaskNode> {
     } else {
       writer->WriteArrayItem(std::string(""));
     }
+
+    if (data.shape_vars) {
+      writer->WriteArrayItem(SaveJSON(data.shape_vars.value()));
+      writer->WriteArrayItem(SaveJSON(data.wkl_insts));
+      writer->WriteArrayItem(SaveJSON(data.wkl_inst_weights));
+    } else {
+      writer->WriteArrayItem(std::string(""));
+      writer->WriteArrayItem(std::string(""));
+      writer->WriteArrayItem(std::string(""));
+    }
+
     writer->WriteArrayItem(static_cast<int>(data.layout_rewrite_option));
     writer->WriteArraySeperator();
     writer->BeginArray(false);
@@ -207,6 +227,32 @@ struct Handler<::tvm::auto_scheduler::SearchTaskNode> {
         }
         s = reader->NextArrayItem();
         ICHECK(s);
+
+        reader->Read(&str_value);
+        if (!str_value.empty()) {
+          data->shape_vars = Downcast<Array<Var>>(LoadJSON(str_value));
+        }
+        s = reader->NextArrayItem();
+        ICHECK(s);
+        reader->Read(&str_value);
+        if (data->shape_vars) {
+          CHECK(!str_value.empty())
+              << "shape_vars=" << data->shape_vars << " but unable to obtain "
+                 "workload instances";
+          data->wkl_insts = Downcast<Array<Array<IntImm>>>(LoadJSON(str_value));
+        }
+        s = reader->NextArrayItem();
+        ICHECK(s);
+        reader->Read(&str_value);
+        if (data->shape_vars) {
+          CHECK(!str_value.empty())
+              << "shape_vars=" << data->shape_vars << " but unable to obtain "
+                 "workload instance weights";
+          data->wkl_inst_weights = Downcast<Array<FloatImm>>(LoadJSON(str_value));
+        }
+        s = reader->NextArrayItem();
+        ICHECK(s);
+
         reader->Read(&int_value);
         data->layout_rewrite_option = ::tvm::auto_scheduler::LayoutRewriteOption(int_value);
         s = reader->NextArrayItem();
