@@ -493,9 +493,9 @@ std::vector<std::pair<State, int>> RuleCustomSketch::Apply(const SketchPolicyNod
 
 PopulationGenerationRule::ResultKind InitFillTileSize::Apply(SketchPolicyNode* policy, State* state,
                                                              std::mt19937* rand_gen) const {
-  SplitFactorizationMemo split_memo;
   int max_innermost_split_factor =
       GetIntParam(policy->params, SketchParamKey::max_innermost_split_factor);
+  SplitFactorizationMemo split_memo(max_innermost_split_factor);
 
   StateNode* pstate = state->CopyOnWrite();
   // Scan the transformation history and randomly fill tiles size for all SplitStep
@@ -514,8 +514,7 @@ PopulationGenerationRule::ResultKind InitFillTileSize::Apply(SketchPolicyNode* p
 
       ICHECK(ps->extent);
       int extent = GetIntImm(ps->extent.value());
-      const auto& candidate_lens = split_memo.GetFactorizationSchemes(extent, ps->lengths.size(),
-                                                                      max_innermost_split_factor);
+      const auto& candidate_lens = split_memo.GetFactorizationSchemes(extent, ps->lengths.size());
       ICHECK(!candidate_lens.empty());
       const auto& candidate_lengths = candidate_lens[(*rand_gen)() % candidate_lens.size()];
 

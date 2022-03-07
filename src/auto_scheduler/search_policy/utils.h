@@ -32,6 +32,7 @@
 #include <tvm/te/operation.h>
 
 #include <algorithm>
+#include <climits>
 #include <condition_variable>
 #include <set>
 #include <string>
@@ -676,21 +677,81 @@ inline void PrintTitle(const std::string& title, int verbose) {
  */
 class SplitFactorizationMemo {
  public:
+  SplitFactorizationMemo() = default;
+  explicit SplitFactorizationMemo(const int max_innermost_factor)
+      : max_innermost_factor_(max_innermost_factor) {}
+
   using QueryKey = std::tuple<int, int, int>;
 
-  const Array<Array<Integer>>& GetFactorizationSchemes(int extent, int n_lengths,
-                                                       int max_innermost_factor);
+  const Array<Array<Integer>>& GetFactorizationSchemes(int extent, int n_lengths);
   const std::vector<int>& GetFactors(int n);
 
  private:
-  void DfsEnumerate(int now, int remaining_length, int max_innermost_factor);
+  void DfsEnumerate(int now, int remaining_length);
 
+  int max_innermost_factor_ = INT_MAX;
   std::unordered_map<QueryKey, Array<Array<Integer>>> memory_;
 
   int n_lengths_;
   Array<Integer> tmp_stack_;
   Array<Array<Integer>>* results_;
   std::unordered_map<int, std::vector<int>> factor_memory_;
+};
+
+struct SplitStepInfo {
+  bool is_spatial;
+  int64_t max_extent;
+};
+
+struct FactorizationScheme {
+  std::vector<std::vector<int>> split_factors;
+
+  FactorizationScheme() = default;
+
+  /**
+   * @brief Random sample a factorization scheme.
+   */
+  void RandomSample(const std::vector<SplitStepInfo>& split_steps_info,
+                    const HardwareParams& hardware_param,
+                    const size_t max_innermost_factor,
+                    std::mt19937* const rng,
+                    const bool do_mutation,
+                    const bool sample_perfect_tiles);
+  /**
+   * @brief Output the factorization scheme to string.
+   */
+  std::string toString() const {
+    std::ostringstream strout;
+    for (const std::vector<int>& factors : split_factors) { 
+      strout << "(";
+      for (const int f : factors) {
+        strout << f << ",";
+      }
+      strout << ")";
+    }
+    return strout.str();
+  }
+};
+
+class DietCodeSplitFactorizationMemo {
+ public:
+  DietCodeSplitFactorizationMemo() = default;
+  DietCodeSplitFactorizationMemo(const HardwareParams& hardware_params,
+                                 const int max_innermost_factor)
+      : hardware_params_(hardware_params), max_innermost_factor_(max_innermost_factor) {}
+
+  FactorizationScheme
+  SampleFactorizationScheme(const std::vector<SplitStepInfo>& split_steps_info,
+                            std::mt19937* const rng);
+
+  FactorizationScheme
+  MutateFactorizationScheme(const std::vector<SplitStepInfo>& split_steps_info,
+                            std::mt19937* const rng,
+                            const std::vector<std::vector<int>>& curr_split_factors);
+
+ private:
+  HardwareParams hardware_params_;
+  int max_innermost_factor_;
 };
 
 /*! \brief Get the indexes of SplitStep that processes on spatial iterator. */

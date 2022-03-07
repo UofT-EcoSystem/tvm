@@ -397,8 +397,8 @@ void PruneInvalidState(const SearchTask& task, Array<State>* states) {
 
 /********** SplitFactorizationMemo **********/
 const Array<Array<Integer>>& SplitFactorizationMemo::GetFactorizationSchemes(
-    int extent, int n_lengths, int max_innermost_factor) {
-  QueryKey key = std::make_tuple(extent, n_lengths, max_innermost_factor);
+    int extent, int n_lengths) {
+  QueryKey key = std::make_tuple(extent, n_lengths, max_innermost_factor_);
   const auto& it = memory_.find(key);
   if (it != memory_.end()) {
     return it->second;
@@ -408,20 +408,20 @@ const Array<Array<Integer>>& SplitFactorizationMemo::GetFactorizationSchemes(
   results_ = &memory_[key];
   n_lengths_ = n_lengths;
 
-  DfsEnumerate(0, extent, max_innermost_factor);
+  DfsEnumerate(0, extent);
 
   return *results_;
 }
 
-void SplitFactorizationMemo::DfsEnumerate(int now, int remaining_length, int max_innermost_factor) {
+void SplitFactorizationMemo::DfsEnumerate(int now, int remaining_length) {
   if (now == n_lengths_) {
-    if (tmp_stack_.back().as<IntImmNode>()->value <= max_innermost_factor) {
+    if (tmp_stack_.back().as<IntImmNode>()->value <= max_innermost_factor_) {
       results_->push_back(tmp_stack_);
     }
   } else {
     for (const auto& f : GetFactors(remaining_length)) {
       tmp_stack_.Set(now, Integer(f));
-      DfsEnumerate(now + 1, remaining_length / f, max_innermost_factor);
+      DfsEnumerate(now + 1, remaining_length / f);
     }
   }
 }
