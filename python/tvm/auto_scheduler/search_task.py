@@ -386,6 +386,12 @@ class SearchTask(Object):
         The target host device of this search task.
     hardware_params : Optional[HardwareParams]
         Hardware parameters used in this search task.
+    shape_vars : List[tvm.tir.DynShapeVar]
+        Dynamic Shape Variables
+    wkl_insts : List[List[int]]
+        List of Workload Instances
+    wkl_inst_weights : List[float]
+        Weights Associated with Each Workload Instance
     layout_rewrite_option : Optional[LayoutRewriteOption]
         The layout rewrite option used for measuring programs. If None, the default value will be
         set depending on the specified target.
@@ -405,12 +411,6 @@ class SearchTask(Object):
         tuning process.
     desc: str = ""
         The description string of this task.
-    shape_vars : List[tvm.tir.DynShapeVar]
-        Dynamic Shape Variables
-    wkl_insts : List[List[int]]
-        List of Workload Instances
-    wkl_inst_weights : List[float]
-        Weights Associated with Each Workload Instance
 
     Examples
     --------
@@ -437,14 +437,14 @@ class SearchTask(Object):
         target=None,
         target_host=None,
         hardware_params=None,
+        shape_vars=None,
+        wkl_insts=None,
+        wkl_inst_weights=None,
         layout_rewrite_option=None,
         task_inputs=None,
         task_inputs_overwrite=False,
         task_inputs_save_to_file=False,
         desc="",
-        shape_vars=None,
-        wkl_insts=None,
-        wkl_inst_weights=None
     ):
         assert (
             func is not None or workload_key is not None
@@ -485,6 +485,9 @@ class SearchTask(Object):
             target,
             target_host,
             hardware_params,
+            shape_vars,
+            wkl_insts,
+            wkl_inst_weights,
             layout_rewrite_option,
             task_input_names,
             desc,
