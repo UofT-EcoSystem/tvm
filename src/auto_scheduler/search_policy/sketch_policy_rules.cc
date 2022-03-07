@@ -531,13 +531,6 @@ PopulationGenerationRule::ResultKind InitFillTileSize::Apply(SketchPolicyNode* p
   return ResultKind::kValid;
 }
 
-PopulationGenerationRule::ResultKind
-InitFillShapeGenericTileSize::Apply(SketchPolicyNode* policy, State* state,
-                                    std::mt19937* rand_gen) const {
-  return ResultKind::kValid;
-}
-
-
 PopulationGenerationRule::ResultKind InitChangeComputeLocation::Apply(
     SketchPolicyNode* policy, State* state, std::mt19937* rand_gen) const {
   if (GetIntParam(policy->params, SketchParamKey::disable_change_compute_location)) {
