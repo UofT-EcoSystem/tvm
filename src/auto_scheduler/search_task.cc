@@ -65,12 +65,17 @@ HardwareParams HardwareParamsNode::GetDefaultHardwareParams(const Target& target
     auto device_api = static_cast<tvm::runtime::DeviceAPI*>(((*func)()).operator void*());
 
     tvm::runtime::TVMRetValue ret;
+
+    device_api->GetAttr(dev, tvm::runtime::DeviceAttrKind::kMultiProcessorCount, &ret);
+    int mps = ret;
+
     device_api->GetAttr(dev, tvm::runtime::DeviceAttrKind::kMaxSharedMemoryPerBlock, &ret);
     int max_shared_memory_per_block = ret;
 
     // There is no explicit local memory limition in CUDA runtime,
     // so we can use INT32_MAX to disalbe the check on local_memory.
-    int max_local_memory_per_block = INT32_MAX;
+    device_api->GetAttr(dev, tvm::runtime::DeviceAttrKind::kMaxRegistersPerBlock, &ret);
+    int max_local_memory_per_block = ret;
 
     device_api->GetAttr(dev, tvm::runtime::DeviceAttrKind::kMaxThreadsPerBlock, &ret);
     int max_threads_per_block = ret;
@@ -79,7 +84,7 @@ HardwareParams HardwareParamsNode::GetDefaultHardwareParams(const Target& target
     int warp_size = ret;
 
     int max_vthread_extent = warp_size / 4;
-    return HardwareParams(-1, 16, 64, max_shared_memory_per_block, max_local_memory_per_block,
+    return HardwareParams(mps, 16, 64, max_shared_memory_per_block, max_local_memory_per_block,
                           max_threads_per_block, max_vthread_extent, warp_size);
   } else if (device_type == kDLMetal) {
     // Reference: https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf
