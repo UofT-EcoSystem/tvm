@@ -67,6 +67,16 @@ struct hash<std::tuple<T1, T2, T3>> {
 namespace tvm {
 namespace auto_scheduler {
 
+inline size_t ceil_by(const size_t a, const size_t b) {
+  CHECK(b != 0);
+  return (a + b - 1) / b * b;
+}
+
+inline size_t ceil_div(const size_t a, const size_t b) {
+  CHECK(b != 0);
+  return (a + b - 1) / b;
+}
+
 /********** Utilities for Array, std::vector, std::string **********/
 /*! \brief Get the first appearance index of elements in an Array */
 template <typename T>
@@ -167,13 +177,19 @@ inline double FloatArrayMean(const Array<PrimExpr>& float_array) {
   if (float_array.empty()) {
     return 0.0;
   }
+  std::vector<float> float_vector;
 
   for (const auto& x : float_array) {
     auto floatimm = x.as<tir::FloatImmNode>();
     ICHECK(floatimm != nullptr);
     sum += floatimm->value;
+    float_vector.push_back(floatimm->value);
   }
-  return sum / float_array.size();
+  if (float_vector[0] < float_vector[float_vector.size() - 1] * 1.1) {
+    return sum / float_array.size();
+  } else {
+    return float_vector[float_vector.size() - 1];
+  }
 }
 
 /*! \brief Return whether a string starts with another substring */

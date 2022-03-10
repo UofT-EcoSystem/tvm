@@ -446,6 +446,139 @@ const std::vector<int>& SplitFactorizationMemo::GetFactors(int n) {
   return res;
 }
 
+namespace {
+
+/**
+ * @brief Keep halving the current split factor until it is below the maximum extent.
+ */
+void shrink_below_max_extent(int* const curr_split_factor, const size_t max_extent) {
+  bool should_shrink_f = true;
+  while (should_shrink_f) {
+    if (*curr_split_factor == 1) {
+      break;
+    }
+    if (ceil_div(*curr_split_factor, 2) > static_cast<int>(max_extent * 1.1)) {
+      *curr_split_factor = ceil_div(*curr_split_factor, 2);
+      should_shrink_f = true;
+    } else {
+      should_shrink_f = false;
+    }
+  }  // while (should_shrink_f)
+}
+
+}  // anonymous namespace
+
+
+void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_steps_info,
+                                       const HardwareParams& hardware_params,
+                                       const size_t max_innermost_factor,
+                                       std::mt19937* const rng, const bool do_mutation,
+                                       const bool sample_perfect_tiles) {
+  // ===========================================================================
+  // 1. factor[1] (threadIdx.x)
+  // ===========================================================================
+  size_t num_threads_per_block = 0;
+  SplitFactorizationMemo memo;
+
+  // do NOT mutate the threadIdx value in the case of mutation
+  if (!do_mutation) {
+    size_t num_spatial_axes = 0;
+    for (const SplitStepInfo& info : split_steps_info) {
+      if (info.is_spatial) {
+        ++num_spatial_axes;
+      }
+    }
+    const size_t max_warps_per_block =
+        hardware_params->max_threads_per_block / hardware_params->warp_size;
+    std::uniform_int_distribution<>
+        num_threads_per_block_dist(0, max_warps_per_block - 1);
+    num_threads_per_block = (num_threads_per_block_dist(*rng) + 1) * hardware_params->warp_size;
+
+    const Array<Array<Integer>>& num_threads_factor_schemes =
+        memo.GetFactorizationSchemes(num_threads_per_block, num_spatial_axes - 1);
+
+    CHECK(num_threads_factor_schemes.size() != 0);
+
+    // avoid do-while loops, early filter out factorization schemes that are not
+    // valid (i.e., have split factors greater than the maximum extent)
+    Array<Array<Integer>> filtered_num_threads_factor_schemes;
+
+    filtered_num_threads_factor_schemes.reserve(num_threads_factor_schemes.size());
+    for (Array<Integer> factor_scheme : num_threads_factor_schemes) {
+      int64_t factor_prod = 1;
+      for (const Integer& factor : factor_scheme) {
+        factor_prod *= factor;
+      }
+      factor_scheme.push_back(num_threads_per_block / factor_prod);
+
+      // check whether the factorization scheme is valid or not
+      bool all_below_max_extents = true;
+      for (size_t iter_id = 0, spatial_iter_id = 0;
+           iter_id < split_steps_info.size(); ++iter_id) {
+        if (split_steps_info[iter_id].is_spatial) {
+          if (factor_scheme[spatial_iter_id]->value >
+                static_cast<int>(
+                  split_steps_info[iter_id].max_extent * 1.1
+                )
+              ) {
+            all_below_max_extents = false;
+            break;
+          }
+          ++spatial_iter_id;
+        }
+      }  // for (iter_id ∈ [0, split_steps_info.size()))
+      if (!all_below_max_extents) {
+        continue;
+      }
+      filtered_num_threads_factor_schemes.push_back(factor_scheme);
+    }
+
+    const Array<Integer> factor_scheme =
+        RandomChooseAmong(filtered_num_threads_factor_schemes, rng);
+
+    for (size_t iter_id = 0, spatial_iter_id = 0;
+         iter_id < split_steps_info.size(); ++iter_id) {
+      if (split_steps_info[iter_id].is_spatial) {
+        split_factors[iter_id][1] = factor_scheme[spatial_iter_id]->value;
+        ++spatial_iter_id;
+      }
+    }
+  } else {  // if (do_mutation)
+    for (size_t iter_id = 0, spatial_iter_id = 0;
+         iter_id < split_steps_info.size(); ++iter_id) {
+      if (split_steps_info[iter_id].is_spatial) {
+        shrink_below_max_extent(&split_factors[iter_id][1],
+                                split_steps_info[iter_id].max_extent);
+        ++spatial_iter_id;
+      }
+    }
+
+    num_threads_per_block = 1;
+    for (const std::vector<int>& split_factor : split_factors) {
+      if (split_factor.size() == 2) {
+        continue;
+      }
+      num_threads_per_block *= split_factor[1];
+    }
+  }  // if (!do_mutation)
+
+  size_t last_spatial_iter_id = -1;
+  for (size_t iter_id = 0; iter_id < split_steps_info.size(); ++iter_id) {
+    if (split_steps_info[iter_id].is_spatial) {
+      last_spatial_iter_id = iter_id;
+    }
+  }
+  CHECK(last_spatial_iter_id != -1UL);
+  // ===========================================================================
+  // factor[0] (vthread)
+  // ===========================================================================
+  size_t iter_id_to_mutate = -1;
+  if (do_mutation) {
+    iter_id_to_mutate = (*rng)() % split_steps_info.size();
+  }
+}
+
+
 /********** Utils interface API for ffi **********/
 
 TVM_REGISTER_GLOBAL("auto_scheduler.SearchPolicyUtilsGetConsumers")
