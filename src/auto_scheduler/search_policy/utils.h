@@ -664,6 +664,18 @@ inline int RandomChoose(const std::vector<double>& prefix_sum_probs, std::mt1993
          prefix_sum_probs.begin();
 }
 
+template<typename T>
+inline T& RandomChooseAmong(std::vector<T>& vec, std::mt19937* const rng) {
+  std::uniform_int_distribution<> dist(0, vec.size() - 1);
+  return vec[dist(*rng)];
+}
+
+template<typename T>
+inline const T RandomChooseAmong(Array<T>& arr, std::mt19937* const rng) {
+  std::uniform_int_distribution<> dist(0, arr.size() - 1);
+  return arr[dist(*rng)];
+}
+
 /*! \brief Print a title */
 inline void PrintTitle(const std::string& title, int verbose) {
   StdCout(verbose) << Chars('-', 70) << "\n"
@@ -714,8 +726,7 @@ struct FactorizationScheme {
   void RandomSample(const std::vector<SplitStepInfo>& split_steps_info,
                     const HardwareParams& hardware_param,
                     const size_t max_innermost_factor,
-                    std::mt19937* const rng,
-                    const bool do_mutation,
+                    std::mt19937* const rng, const bool do_mutation,
                     const bool sample_perfect_tiles);
   /**
    * @brief Output the factorization scheme to string.
