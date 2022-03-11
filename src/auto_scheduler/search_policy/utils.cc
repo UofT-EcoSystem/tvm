@@ -535,7 +535,7 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
   size_t num_threads_per_block = 0;
   SplitFactorizationMemo memo;
 
-  // do NOT mutate the threadIdx value in the case of mutation
+  // minimize the threadIdx in mutation
   if (!do_mutation) {
     size_t num_spatial_axes = 0;
     for (const SplitStepInfo& info : split_steps_info) {
@@ -551,8 +551,6 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
 
     const Array<Array<Integer>>& num_threads_factor_schemes =
         memo.GetFactorizationSchemes(num_threads_per_block, num_spatial_axes - 1);
-
-    CHECK(num_threads_factor_schemes.size() != 0);
 
     // filter out factorization schemes that are not valid (i.e., have split
     // factors greater than the maximum extent)
@@ -624,7 +622,6 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
       last_spatial_iter_id = iter_id;
     }
   }
-  CHECK(last_spatial_iter_id != -1UL);
   if (do_mutation) {
     iter_id_to_mutate = (*rng)() % split_steps_info.size();
   }
@@ -719,12 +716,67 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
           if (fcontinue_predicate(iter_id)) {
             continue;
           }
-          CHECK(factors_to_assign_it != factors_to_assign.end());
           ffactor_to_assign(iter_id) = *factors_to_assign_it;
           ++factors_to_assign_it;
         }
-        CHECK(factors_to_assign_it == factors_to_assign.end());
       };
+
+  sample_factors(
+        [&](const size_t iter_id) -> bool {
+          return (!split_steps_info[iter_id].is_spatial) || 
+                 (iter_id != last_spatial_iter_id);
+        },
+        [&](const size_t iter_id) -> size_t {
+          return hardware_params->max_vthread_extent;
+        },
+        [&](const size_t iter_id) -> int& {
+          return split_factors[iter_id][0];
+        },
+        [&](const size_t iter_id) -> size_t {
+          return ceil_div(split_steps_info[iter_id].max_extent,
+                          split_factors[iter_id][1]
+                 );
+        }
+      );
+  // ===========================================================================
+  // factor[3] (innermost)
+  // ===========================================================================
+  sample_factors(
+        [&](const size_t iter_id) -> bool {
+          return (!split_steps_info[iter_id].is_spatial) || 
+                 (iter_id == last_spatial_iter_id);
+                 // always make sure that the final spatial axis has a stride of 1
+        },
+        [&](const size_t iter_id) -> size_t {
+          return max_innermost_factor;
+        },
+        [&](const size_t iter_id) -> int& {
+          return split_factors[iter_id][3];
+        },
+        [&](const size_t iter_id) -> size_t {
+          return ceil_div(
+                   split_steps_info[iter_id].max_extent,
+                   split_factors[iter_id][0] * split_factors[iter_id][1]
+                 );
+        }
+      );
+  // ===========================================================================
+  // reduce factor[1] (innermost)
+  // ===========================================================================
+  sample_factors(
+        [&](const size_t iter_id) -> bool {
+          return split_steps_info[iter_id].is_spatial;
+        },
+        [&](const size_t iter_id) -> size_t {
+          return max_innermost_factor;
+        },
+        [&](const size_t iter_id) -> int& {
+          return split_factors[iter_id][1];
+        },
+        [&](const size_t iter_id) -> size_t {
+          return split_steps_info[iter_id].max_extent;
+        }
+      );
 }
 
 
