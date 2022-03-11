@@ -466,6 +466,59 @@ void shrink_below_max_extent(int* const curr_split_factor, const size_t max_exte
   }  // while (should_shrink_f)
 }
 
+std::vector<int> mutate_split_factors(const std::vector<int>& input_split_factors,
+                                      const int max_innermost_extent,
+                                      std::mt19937* const rng, SplitFactorizationMemo& memo) {
+  std::vector<int> random_perm;
+  RandomPermutation(input_split_factors.size(), &random_perm, rng);
+
+  // try to divide a factor from one tile size and multiple it to another.
+  for (size_t i = 0; i < random_perm.size(); ++i) {
+    size_t src_idx = random_perm[i];
+    int src_factor = input_split_factors[src_idx];
+    if (src_factor <= 1) {
+      continue;
+    }
+
+    // divide one factor from lengths[src_idx] and multiply it to lengths[dst_idx]
+    size_t dst_idx = random_perm[(i + 1) % random_perm.size()];
+    const std::vector<int>& factors = memo.GetFactors(src_factor);
+    ICHECK_GE(factors.size(), 1);
+
+    int divide_factor;
+    if (dst_idx == input_split_factors.size() - 1) {
+      // maintain the restriction of hardware_params.max_innermost_split_factor.
+      int max_factor_index = static_cast<int>(factors.size()) - 1;
+      for (; max_factor_index >= 1; max_factor_index--) {
+        if (factors[max_factor_index] * input_split_factors[dst_idx] <= max_innermost_extent) {
+          break;
+        }
+      }
+      if (max_factor_index == 0) {
+        // failed on this dst_idx, try next one.
+        continue;
+      }
+      divide_factor = factors[1 + (*rng)() % (max_factor_index)];
+    } else {
+      divide_factor = factors[1 + (*rng)() % (factors.size() - 1)];
+    }
+
+    // divide one factor from lengths[src_idx] and multiply it to lengths[dst_idx].
+    std::vector<int> new_split_factors;
+    for (size_t j = 0; j < input_split_factors.size(); ++j) {
+      if (j == src_idx) {
+        new_split_factors.push_back(Integer(input_split_factors[j] / divide_factor));
+      } else if (j == dst_idx) {
+        new_split_factors.push_back(Integer(input_split_factors[j] * divide_factor));
+      } else {
+        new_split_factors.push_back(Integer(input_split_factors[j]));
+      }
+    }
+    return new_split_factors;
+  }
+  return input_split_factors;
+}
+
 }  // anonymous namespace
 
 
@@ -499,8 +552,8 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
 
     CHECK(num_threads_factor_schemes.size() != 0);
 
-    // avoid do-while loops, early filter out factorization schemes that are not
-    // valid (i.e., have split factors greater than the maximum extent)
+    // filter out factorization schemes that are not valid (i.e., have split
+    // factors greater than the maximum extent)
     Array<Array<Integer>> filtered_num_threads_factor_schemes;
 
     filtered_num_threads_factor_schemes.reserve(num_threads_factor_schemes.size());
@@ -544,6 +597,7 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
       }
     }
   } else {  // if (do_mutation)
+    // In the case of mutation, minimize the change in threadIdx
     for (size_t iter_id = 0, spatial_iter_id = 0;
          iter_id < split_steps_info.size(); ++iter_id) {
       if (split_steps_info[iter_id].is_spatial) {
@@ -561,21 +615,168 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
       num_threads_per_block *= split_factor[1];
     }
   }  // if (!do_mutation)
-
-  size_t last_spatial_iter_id = -1;
+  // =========================================================================== 
+  size_t last_spatial_iter_id = -1, iter_id_to_mutate = -1;
   for (size_t iter_id = 0; iter_id < split_steps_info.size(); ++iter_id) {
     if (split_steps_info[iter_id].is_spatial) {
       last_spatial_iter_id = iter_id;
     }
   }
   CHECK(last_spatial_iter_id != -1UL);
-  // ===========================================================================
-  // factor[0] (vthread)
-  // ===========================================================================
-  size_t iter_id_to_mutate = -1;
   if (do_mutation) {
     iter_id_to_mutate = (*rng)() % split_steps_info.size();
   }
+  // ===========================================================================
+  // factor[0] (vthread)
+  // ===========================================================================
+
+  /**
+   * @brief Inline function for sampling factors.
+   * @param fcontinue_predicate Whether to skip the current split factor
+   * @param fmax_extent Return the maximum extent
+   * @param ffactor_to_assign Return the factor to assign
+   * @param fextent_to_factor Return the extent to factor
+   */
+  auto sample_factors = [&](std::function<bool(const size_t)>   fcontinue_predicate,
+                            std::function<size_t(const size_t)> fmax_extent,
+                            std::function<int&(const size_t)>   ffactor_to_assign,
+                            std::function<size_t(const size_t)> fextent_to_factor) {
+        std::vector<size_t> factors_to_assign;
+        for (size_t iter_id = 0; iter_id < split_steps_info.size(); ++iter_id) {
+          if (fcontinue_predicate(iter_id)) {
+            continue;
+          }
+          const size_t max_extent =
+              std::min(fmax_extent(iter_id), fextent_to_factor(iter_id));
+          if (do_mutation) {
+            if (iter_id != iter_id_to_mutate) {
+              continue;
+            }
+            int& curr_inner_factor = ffactor_to_assign(iter_id);
+            shrink_below_max_extent(&curr_inner_factor, max_extent);
+            if (split_steps_info[iter_id].is_spatial) {
+              const int curr_nthreads_factor = split_factors[iter_id][1];
+              int curr_outer_factor = ceil_div(fextent_to_factor(iter_id),
+                                               curr_inner_factor);
+              std::vector<int> mutated_split_factors =
+                  mutate_split_factors({curr_outer_factor, curr_nthreads_factor, curr_inner_factor},
+                                       fmax_extent(iter_id), rng, memo);
+
+              split_factors[iter_id][1] = mutated_split_factors[1];
+              ffactor_to_assign(iter_id) = mutated_split_factors[2];
+            } else {
+              int curr_outer_factor = ceil_div(fextent_to_factor(iter_id),
+                                                curr_inner_factor);
+              CHECK(curr_outer_factor >= 1);
+
+              std::vector<int> mutated_split_factors =
+                  mutate_split_factors({curr_outer_factor, curr_inner_factor},
+                                       fmax_extent(iter_id), rng, memo);
+              CHECK(mutated_split_factors.size() == 2);
+              CHECK(mutated_split_factors[0] >= 1);
+              CHECK(mutated_split_factors[1] >= 1);
+
+              // LOG(FATAL) << "orig_split_factors="
+              //                 << ArrayToString(std::vector<int>{curr_outer_factor, curr_inner_factor}) << ", "
+              //               "mutated_split_factors=" << ArrayToString(mutated_split_factors);
+
+
+              ffactor_to_assign(iter_id) = mutated_split_factors[1];
+            }
+            // directly return after a mutation has been made
+            return;
+          }  // if (do_mutation)
+
+          // sampling
+          CHECK(max_extent > 0);
+          size_t factor_to_assign = 0;
+
+          if (sample_perfect_tiles) {
+            // LOG(INFO) << "Sampling perfect tile size of "
+            //           << extent_to_factor(iter_id) << " vs. max="
+            //           << iter_max_extent;
+            const size_t extent_to_factor = fextent_to_factor(iter_id);
+            const std::vector<int>& extent_factors = memo.GetFactors(extent_to_factor);
+            std::vector<int> filtered_extent_factors;
+            filtered_extent_factors.reserve(extent_factors.size());
+
+            for (const int factor : extent_factors) {
+              if (static_cast<size_t>(factor) <= static_cast<int>(max_extent * 1.1)) {
+                filtered_extent_factors.push_back(factor);
+              }
+            }
+
+            if (!filtered_extent_factors.empty() &&
+                (extent_to_factor <= C_EXTENT_THRESHOLD || 
+                 (extent_to_factor > C_EXTENT_THRESHOLD && filtered_extent_factors.size() >= C_MIN_NUM_FACTORS))
+                ) {
+              factor_to_assign =
+                  RandomChooseAmong(filtered_extent_factors, rng);
+            } // else {
+            //   LOG(WARNING) << "Sampling imperfect tile size. "
+            //                   "filtered_extent_factors=" << ArrayToString(filtered_extent_factors) << ", "
+            //                   "extent_to_factor=" << extent_to_factor;
+            // }
+          }
+          if (factor_to_assign == 0) {
+            std::uniform_int_distribution<> dist(1, max_extent);
+            factor_to_assign = dist(*rng);
+          }
+          CHECK(factor_to_assign >= 1);
+          // if (split_steps_info[iter_id].is_spatial) {
+          //   reg_usage *= factor_to_assign;
+          // } else {
+          //   shmem_usage *= factor_to_assign;
+          // }
+          // max_extents.push_back(max_extent);
+          factors_to_assign.push_back(factor_to_assign);
+        }
+        if (factors_to_assign.empty()) {
+          CHECK(do_mutation);
+          return;
+        }
+        // // shuffle the factors
+        // std::vector<size_t> factors_to_assign_bak = factors_to_assign;
+        // std::shuffle(factors_to_assign.begin(), factors_to_assign.end(), *rng);
+        // // make sure that the shuffle is valid
+        // bool valid_shuffle = true;
+        // std::vector<size_t>::iterator
+        //     max_extents_it = max_extents.begin(),
+        //     factors_to_assign_it = factors_to_assign.begin();
+        // // LOG(INFO) << "iter_max_extents=" << ArrayToString(iter_max_extents)
+        // //           << " vs. factors_to_assign="
+        // //           << ArrayToString(factors_to_assign);
+        // for (size_t iter_id = 0; iter_id < split_steps_info.size(); ++iter_id) {
+        //   if (fcontinue_predicate(iter_id)) {
+        //     continue;
+        //   }
+        //   size_t iter_max_extent = *max_extents_it;
+        //   if (*factors_to_assign_it > iter_max_extent) {
+        //     valid_shuffle = false;
+        //   }
+        //   ++max_extents_it;
+        //   ++factors_to_assign_it;
+        // }
+        // if (!valid_shuffle) {
+        //   if (enable_verbose_logging) {
+        //     LOG(WARNING) << "Shuffling is not valid";
+        //   }
+        //   factors_to_assign = std::move(factors_to_assign_bak);
+        // }
+
+        // do the actual assignment
+        std::vector<size_t>::iterator factors_to_assign_it = factors_to_assign.begin();
+        for (size_t iter_id = 0; iter_id < split_steps_info.size(); ++iter_id) {
+          if (fcontinue_predicate(iter_id)) {
+            continue;
+          }
+          CHECK(factors_to_assign_it != factors_to_assign.end());
+          ffactor_to_assign(iter_id) = *factors_to_assign_it;
+          ++factors_to_assign_it;
+        }
+        CHECK(factors_to_assign_it == factors_to_assign.end());
+      };
+
 }
 
 
