@@ -527,6 +527,8 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
                                        const size_t max_innermost_factor,
                                        std::mt19937* const rng, const bool do_mutation,
                                        const bool sample_perfect_tiles) {
+  constexpr size_t C_EXTENT_THRESHOLD = 16,
+                   C_MIN_NUM_FACTORS = 4;
   // ===========================================================================
   // 1. factor[1] (threadIdx.x)
   // ===========================================================================
@@ -648,6 +650,9 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
           }
           const size_t max_extent =
               std::min(fmax_extent(iter_id), fextent_to_factor(iter_id));
+          // ===================================================================
+          // Mutation
+          // ===================================================================
           if (do_mutation) {
             if (iter_id != iter_id_to_mutate) {
               continue;
@@ -661,40 +666,25 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
               std::vector<int> mutated_split_factors =
                   mutate_split_factors({curr_outer_factor, curr_nthreads_factor, curr_inner_factor},
                                        fmax_extent(iter_id), rng, memo);
-
               split_factors[iter_id][1] = mutated_split_factors[1];
               ffactor_to_assign(iter_id) = mutated_split_factors[2];
             } else {
               int curr_outer_factor = ceil_div(fextent_to_factor(iter_id),
                                                 curr_inner_factor);
-              CHECK(curr_outer_factor >= 1);
-
               std::vector<int> mutated_split_factors =
                   mutate_split_factors({curr_outer_factor, curr_inner_factor},
                                        fmax_extent(iter_id), rng, memo);
-              CHECK(mutated_split_factors.size() == 2);
-              CHECK(mutated_split_factors[0] >= 1);
-              CHECK(mutated_split_factors[1] >= 1);
-
-              // LOG(FATAL) << "orig_split_factors="
-              //                 << ArrayToString(std::vector<int>{curr_outer_factor, curr_inner_factor}) << ", "
-              //               "mutated_split_factors=" << ArrayToString(mutated_split_factors);
-
-
               ffactor_to_assign(iter_id) = mutated_split_factors[1];
             }
             // directly return after a mutation has been made
             return;
           }  // if (do_mutation)
-
-          // sampling
-          CHECK(max_extent > 0);
+          // ===================================================================
+          // Sampling
+          // ===================================================================
           size_t factor_to_assign = 0;
 
           if (sample_perfect_tiles) {
-            // LOG(INFO) << "Sampling perfect tile size of "
-            //           << extent_to_factor(iter_id) << " vs. max="
-            //           << iter_max_extent;
             const size_t extent_to_factor = fextent_to_factor(iter_id);
             const std::vector<int>& extent_factors = memo.GetFactors(extent_to_factor);
             std::vector<int> filtered_extent_factors;
@@ -705,65 +695,24 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
                 filtered_extent_factors.push_back(factor);
               }
             }
-
             if (!filtered_extent_factors.empty() &&
                 (extent_to_factor <= C_EXTENT_THRESHOLD || 
-                 (extent_to_factor > C_EXTENT_THRESHOLD && filtered_extent_factors.size() >= C_MIN_NUM_FACTORS))
+                 (extent_to_factor > C_EXTENT_THRESHOLD &&
+                  filtered_extent_factors.size() >= C_MIN_NUM_FACTORS))
                 ) {
               factor_to_assign =
                   RandomChooseAmong(filtered_extent_factors, rng);
-            } // else {
-            //   LOG(WARNING) << "Sampling imperfect tile size. "
-            //                   "filtered_extent_factors=" << ArrayToString(filtered_extent_factors) << ", "
-            //                   "extent_to_factor=" << extent_to_factor;
-            // }
+            }
           }
           if (factor_to_assign == 0) {
             std::uniform_int_distribution<> dist(1, max_extent);
             factor_to_assign = dist(*rng);
           }
-          CHECK(factor_to_assign >= 1);
-          // if (split_steps_info[iter_id].is_spatial) {
-          //   reg_usage *= factor_to_assign;
-          // } else {
-          //   shmem_usage *= factor_to_assign;
-          // }
-          // max_extents.push_back(max_extent);
           factors_to_assign.push_back(factor_to_assign);
         }
         if (factors_to_assign.empty()) {
-          CHECK(do_mutation);
           return;
         }
-        // // shuffle the factors
-        // std::vector<size_t> factors_to_assign_bak = factors_to_assign;
-        // std::shuffle(factors_to_assign.begin(), factors_to_assign.end(), *rng);
-        // // make sure that the shuffle is valid
-        // bool valid_shuffle = true;
-        // std::vector<size_t>::iterator
-        //     max_extents_it = max_extents.begin(),
-        //     factors_to_assign_it = factors_to_assign.begin();
-        // // LOG(INFO) << "iter_max_extents=" << ArrayToString(iter_max_extents)
-        // //           << " vs. factors_to_assign="
-        // //           << ArrayToString(factors_to_assign);
-        // for (size_t iter_id = 0; iter_id < split_steps_info.size(); ++iter_id) {
-        //   if (fcontinue_predicate(iter_id)) {
-        //     continue;
-        //   }
-        //   size_t iter_max_extent = *max_extents_it;
-        //   if (*factors_to_assign_it > iter_max_extent) {
-        //     valid_shuffle = false;
-        //   }
-        //   ++max_extents_it;
-        //   ++factors_to_assign_it;
-        // }
-        // if (!valid_shuffle) {
-        //   if (enable_verbose_logging) {
-        //     LOG(WARNING) << "Shuffling is not valid";
-        //   }
-        //   factors_to_assign = std::move(factors_to_assign_bak);
-        // }
-
         // do the actual assignment
         std::vector<size_t>::iterator factors_to_assign_it = factors_to_assign.begin();
         for (size_t iter_id = 0; iter_id < split_steps_info.size(); ++iter_id) {
@@ -776,7 +725,6 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
         }
         CHECK(factors_to_assign_it == factors_to_assign.end());
       };
-
 }
 
 
