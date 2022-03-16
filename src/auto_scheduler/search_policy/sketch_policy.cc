@@ -81,8 +81,6 @@ SketchPolicy::SketchPolicy(SearchTask task, CostModel program_cost_model,
   node->sample_init_min_pop_ =
       GetIntParam(node->params, SketchParamKey::SampleInitPopulation::min_population);
 
-  // <DietCode>
-  //
   // Initialize the factorization cache.
   int max_innermost_split_factor =
       GetIntParam(node->params, SketchParamKey::max_innermost_split_factor);
@@ -162,8 +160,12 @@ SketchPolicy::SketchPolicy(SearchTask task, CostModel program_cost_model,
     }
 
     // Mutation Rules for Evolutionary Search
-    node->mutation_rules.push_back(std::make_shared<MutateTileSize>(0.90));
-    node->mutation_rules.push_back(std::make_shared<MutateAutoUnroll>(0.10));
+    if (IsDynTask(node->search_task)) {
+      node->mutation_rules.push_back(std::make_shared<MutateDietCodeTileSize>(1.0));
+    } else {
+      node->mutation_rules.push_back(std::make_shared<MutateTileSize>(0.90));
+      node->mutation_rules.push_back(std::make_shared<MutateAutoUnroll>(0.10));
+    }
   } else {
     LOG(FATAL) << "No default sketch rules for target: " << task->target;
   }

@@ -47,8 +47,6 @@
 namespace tvm {
 namespace auto_scheduler {
 
-// <DietCode>
-//
 /**
  * @brief Check whether the task involves dynamic shape variables.
  */
