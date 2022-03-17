@@ -1,5 +1,6 @@
 #pragma once
 
+#include <tvm/arith/int_set.h>
 #include <tvm/tir/stmt_functor.h>
 
 namespace tvm {
@@ -20,6 +21,9 @@ class DynShapeVarReplacer : public StmtExprMutator {
   explicit DynShapeVarReplacer(std::function<PrimExpr(const VarNode*)> freplace_expr)
       : freplace_expr_(freplace_expr) {}
 };
+
+arith::IntSet EvaluateRangeForAllWklInsts(const PrimExpr& expr, const Array<Var>& shape_vars,
+                                          const Array<Array<IntImm>>& wkl_insts);
 
 }  // namespace tir
 }  // namespace tvm
