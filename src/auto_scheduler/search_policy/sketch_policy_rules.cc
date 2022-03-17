@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "sketch_policy.h"
+#include "../../tir/ir/dyn_shape_var.h"
 
 namespace tvm {
 namespace auto_scheduler {
@@ -530,6 +531,169 @@ PopulationGenerationRule::ResultKind InitFillTileSize::Apply(SketchPolicyNode* p
   return ResultKind::kValid;
 }
 
+
+namespace {
+
+std::vector<SplitStepInfo> GetSplitStepsInfoFromWklInst(
+    const State* const state, const std::vector<size_t>& split_step_ids,
+    const Array<Var>& shape_vars, const Array<IntImm>& selected_inst) {
+  std::vector<SplitStepInfo> split_steps_info;
+
+  arith::Analyzer analyzer;
+  Map<String, IntImm> shape_var_value_map;
+  CHECK(shape_vars.size() == selected_inst.size());
+  for (size_t i = 0; i < shape_vars.size(); ++i) {
+    shape_var_value_map.Set(shape_vars[i]->name_hint, selected_inst[i]);
+  }
+  DynShapeVarReplacer replacer(
+        [&shape_var_value_map](const VarNode* op) -> PrimExpr {
+          auto shape_var_value_map_iter =
+              shape_var_value_map.find(op->name_hint);
+          if (shape_var_value_map_iter != shape_var_value_map.end()) {
+            return (*shape_var_value_map_iter).second;
+          }
+          LOG(FATAL) << "Dynamic Axis Node " << GetRef<Var>(op)
+                     << " has not been found";
+          return GetRef<Var>(op);
+        }
+      );
+
+  for (const size_t split_step_id : split_step_ids) {
+    const SplitStep& split_step =
+        Downcast<SplitStep>((*state)->transform_steps[split_step_id]);
+    if (split_step->lengths.size() != 4) {
+      CHECK(split_step->lengths.size() == 2);
+      split_steps_info.push_back(
+            SplitStepInfo{
+              false,
+              GetIntImm(analyzer.Simplify(replacer(split_step->extent.value())))
+            }
+          );
+    } else {
+      split_steps_info.push_back(
+            SplitStepInfo{
+              true,
+              GetIntImm(analyzer.Simplify(replacer(split_step->extent.value())))
+            }
+          );
+    }
+  }  // for (split_step_id ∈ split_step_ids)
+  return split_steps_info;
+}
+
+std::vector<SplitStepInfo> GetSplitStepsInfoFromWklInsts(
+    const State* const state, const std::vector<size_t>& split_step_ids,
+    const Array<Var>& shape_vars, const Array<Array<IntImm>>& wkl_insts) {
+  std::vector<SplitStepInfo> split_steps_info;
+  for (const size_t split_step_id : split_step_ids) {
+    const SplitStep& split_step =
+        Downcast<SplitStep>((*state)->transform_steps[split_step_id]);
+    if (split_step->lengths.size() != 4) {
+      CHECK(split_step->lengths.size() == 2);
+      split_steps_info.push_back(
+            SplitStepInfo{
+              false,
+              GetIntImm(EvaluateRangeForAllWklInsts(split_step->extent.value(),
+                                                    shape_vars, wkl_insts).max())
+            }
+          );
+    } else {
+      split_steps_info.push_back(
+            SplitStepInfo{
+              true,
+              GetIntImm(EvaluateRangeForAllWklInsts(split_step->extent.value(),
+                                                    shape_vars, wkl_insts).max())
+            }
+          );
+    }
+  }  // for (split_step_id ∈ split_step_ids)
+  return split_steps_info;
+}
+
+size_t GetUnrollingLength(State* state) {
+  size_t unrolling_length = 1;
+  for (size_t i = 0; i < (*state)->transform_steps.size(); ++i) {
+    if (const SplitStepNode* const split_step =
+          (*state)->transform_steps[i].as<SplitStepNode>()) {
+      if (!split_step->extent.defined() ||
+          (*state)->stages[split_step->stage_id]->op->name.find(".shared") !=
+            std::string::npos) {
+        continue;
+      }
+      if (split_step->lengths.size() == 4) {
+        unrolling_length *= (split_step->lengths[0].value()->value
+                               * split_step->lengths[3].value()->value);
+      } else {
+        unrolling_length *= (split_step->lengths[1].value()->value);
+      }
+    }
+  }  // for (i ∈ (*state)->transform_steps)
+  return unrolling_length;
+}
+
+}  // anonymous namespace
+
+PopulationGenerationRule::ResultKind
+InitFillDietCodeTileSizes::Apply(SketchPolicyNode* policy, State* state,
+                                 std::mt19937* rand_gen) const {
+  std::vector<size_t> split_step_ids;
+  for (size_t step_id = 0; step_id < (*state)->transform_steps.size();
+       ++step_id) {
+    if (auto ps = (*state)->transform_steps[step_id].as<SplitStepNode>()) {
+      bool all_defined = true;
+      for (const auto& len : ps->lengths) {
+        if (!len) {
+          all_defined = false;
+          break;
+        }
+      }
+      if (all_defined) {
+        continue;
+      }
+      split_step_ids.push_back(step_id);
+    }
+  }
+  std::vector<SplitStepInfo> split_steps_info =
+        GetSplitStepsInfoFromWklInsts(state, split_step_ids,
+                                      policy->search_task->shape_vars.value(),
+                                      policy->search_task->wkl_insts);
+
+  FactorizationScheme scheme = policy->dietcode_split_memo.SampleFactorizationScheme(
+                                 split_steps_info, rand_gen
+                               );
+
+  StateNode* pstate = state->CopyOnWrite();
+  for (size_t step_id = 0, iter_id = 0;
+       step_id < (*state)->transform_steps.size();
+       ++step_id) {
+    if (auto ps = (*state)->transform_steps[step_id].as<SplitStepNode>()) {
+      bool all_defined = true;
+      for (const auto& len : ps->lengths) {
+        if (!len) {
+          all_defined = false;
+          break;
+        }
+      }
+      if (all_defined) {
+        continue;
+      }
+      Array<Optional<Integer>> split_factor;
+      for (size_t i = 0; i < scheme.split_factors[iter_id].size(); ++i) {
+        split_factor.push_back(Integer(scheme.split_factors[iter_id][i]));
+      }
+      pstate->transform_steps.Set(
+            step_id,
+            SplitStep(ps->stage_id, ps->iter_id, ps->extent, split_factor,
+                      ps->inner_to_outer)
+          );
+      ++iter_id;
+    }
+  }
+  pstate->concrete = true;
+  return ResultKind::kValid;
+}
+
+
 PopulationGenerationRule::ResultKind InitChangeComputeLocation::Apply(
     SketchPolicyNode* policy, State* state, std::mt19937* rand_gen) const {
   if (GetIntParam(policy->params, SketchParamKey::disable_change_compute_location)) {
@@ -692,6 +856,27 @@ PopulationGenerationRule::ResultKind InitUnroll::Apply(SketchPolicyNode* policy,
 
   return ResultKind::kValid;
 }
+
+
+PopulationGenerationRule::ResultKind InitDietCodeUnroll::Apply(SketchPolicyNode* policy, State* state,
+                                                               std::mt19937* rand_gen) const {
+  for (size_t stage_id = 0; stage_id < (*state)->stages.size(); ++stage_id) {
+    const Stage& stage = (*state)->stages[stage_id];
+    if (stage->compute_at == ComputeAtKind::kInlined ||
+        stage->op_type == StageKind::kPlaceholder) {
+      continue;
+    }
+    if (HasReduceIter(stage)) {
+      size_t unrolling_length = GetUnrollingLength(state);
+      state->pragma(stage_id, (*state)->stages[stage_id]->iters[0],
+                    std::string("auto_unroll_max_step")
+                      + "$" + std::to_string(unrolling_length)
+                    );
+    }
+  }
+  return ResultKind::kValid;
+}
+
 
 PopulationGenerationRule::ResultKind InitVectorization::Apply(SketchPolicyNode* policy,
                                                               State* state,
@@ -1016,6 +1201,108 @@ PopulationGenerationRule::ResultKind MutateTileSize::Apply(SketchPolicyNode* pol
   }
   return ResultKind::kInvalid;
 }
+
+
+namespace {
+
+void AdjustUnrollingFactor(State* state) {
+  std::vector<int> pragma_steps;
+  for (size_t i = 0; i < (*state)->transform_steps.size(); ++i) {
+    if (auto ps = (*state)->transform_steps[i].as<PragmaStepNode>()) {
+      if (StrStartsWith(ps->pragma_type, "auto_unroll_max_step")) {
+        pragma_steps.push_back(i);
+      }
+    }
+  }
+  if (pragma_steps.empty()) {
+    return;
+  }
+
+  CHECK(pragma_steps.size() == 1);
+
+  auto step_id = pragma_steps[0];
+  auto ps = (*state)->transform_steps[step_id].as<PragmaStepNode>();
+  ICHECK(ps);
+
+  size_t unrolling_length = GetUnrollingLength(state);
+
+  StateNode* pstate = state->CopyOnWrite();
+  pstate->transform_steps.Set(
+      step_id, PragmaStep(ps->stage_id, ps->iter_id,
+                          std::string("auto_unroll_max_step") + "$"
+                            + std::to_string(unrolling_length)
+                          ));
+  Stage new_stage = pstate->stages[ps->stage_id];
+  new_stage.CopyOnWrite()->attrs.auto_unroll_max_step = unrolling_length;
+  pstate->stages.Set(ps->stage_id, new_stage);
+}
+
+}  // anonymous namespace
+
+PopulationGenerationRule::ResultKind
+MutateDietCodeTileSizes::Apply(SketchPolicyNode* policy, State* state,
+                               std::mt19937* rand_gen) const {
+  std::vector<size_t> split_step_ids;
+  std::vector<std::vector<int>> curr_split_factors;
+
+  for (size_t i = 0; i < (*state)->transform_steps.size(); ++i) {
+    if (const SplitStepNode* const split_step =
+          (*state)->transform_steps[i].as<SplitStepNode>()) {
+      if (!split_step->extent.defined() ||
+          (*state)->stages[split_step->stage_id]->op->name.find(".shared") !=
+            std::string::npos) {
+        continue;
+      }
+      split_step_ids.push_back(i);
+      curr_split_factors.push_back(std::vector<int>());
+      for (const Optional<Integer>& length : split_step->lengths) {
+        curr_split_factors.back().push_back(length.value()->value);
+      }
+    }
+  }  // for (i ∈ (*state)->transform_steps)
+
+  if (split_step_ids.empty()) {
+    return ResultKind::kInvalid;
+  }
+
+  // randomly choose an instance to optimize for, the probability, as is
+  // calculated in measure.cc, is based on the formula:
+  //
+  // flop * freq / thruput
+  std::vector<SplitStepInfo> split_steps_info =
+      GetSplitStepsInfoFromWklInst(
+        state, split_step_ids,
+        policy->search_task->shape_vars.value(),
+        policy->search_task->wkl_insts[0]
+      );
+
+  // Now that we have determined the optimization target, sample as if it is a
+  // static workload.
+  StateNode* pstate = state->CopyOnWrite();
+  FactorizationScheme mutated_scheme =
+      policy->dietcode_split_memo.MutateFactorizationScheme(
+        split_steps_info, rand_gen, curr_split_factors
+      );
+  CHECK(mutated_scheme.split_factors.size() == split_step_ids.size());
+  for (size_t i = 0; i < split_step_ids.size(); ++i) {
+    const SplitStepNode* const split_step =
+        (*state)->transform_steps[split_step_ids[i]].as<SplitStepNode>();
+
+    Array<Optional<Integer>> new_split_factor;
+    for (const int f : mutated_scheme.split_factors[i]) {
+      new_split_factor.push_back(Integer(f));
+    }
+    pstate->transform_steps.Set(
+          split_step_ids[i],
+          SplitStep(split_step->stage_id, split_step->iter_id,
+                    split_step->extent, new_split_factor,
+                    split_step->inner_to_outer)
+        );
+  }
+  AdjustUnrollingFactor(state);
+  return ResultKind::kValid;
+}
+
 
 PopulationGenerationRule::ResultKind MutateAutoUnroll::Apply(SketchPolicyNode* policy, State* state,
                                                              std::mt19937* rand_gen) const {

@@ -196,6 +196,12 @@ DEFINE_INIT_POPULATION_RULE(InitParallel);
 /*! \brief The rule that annotates unroll. */
 DEFINE_INIT_POPULATION_RULE(InitUnroll);
 
+/**
+ * @brief The rule that initializes DietCode tile sizes and unrolling lengths.
+ */
+DEFINE_INIT_POPULATION_RULE(InitFillDietCodeTileSizes);
+DEFINE_INIT_POPULATION_RULE(InitDietCodeUnroll);
+
 /*! \brief The rule that annotates vectorization. */
 DEFINE_INIT_POPULATION_RULE(InitVectorization);
 
@@ -228,6 +234,11 @@ class PopulationMutationRule : public PopulationGenerationRule {
 /*! \brief The rule that mutates tile size by randomly dividing a tile size by a factor
     and multipling it to another tile size. */
 DEFINE_MUTATE_POPULATION_RULE(MutateTileSize);
+
+/**
+ * @brief The rule that mutates tile sizes (for dynamic search tasks).
+ */
+DEFINE_MUTATE_POPULATION_RULE(MutateDietCodeTileSizes);
 
 /*! \brief The rule that mutates the number of fused outer iterators annotated by parallel. */
 DEFINE_MUTATE_POPULATION_RULE(MutateParallel);

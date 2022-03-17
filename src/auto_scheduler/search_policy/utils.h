@@ -761,6 +761,9 @@ class DietCodeSplitFactorizationMemo {
  private:
   HardwareParams hardware_params_;
   int max_innermost_factor_;
+
+  std::uniform_real_distribution<> uniform_real_disb_ = std::uniform_real_distribution<>(0.f, 1.f);
+  static const float C_SAMPLE_PERFECT_TILES_PROB;
 };
 
 /*! \brief Get the indexes of SplitStep that processes on spatial iterator. */

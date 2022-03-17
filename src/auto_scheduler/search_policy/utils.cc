@@ -631,6 +631,7 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
 
   /**
    * @brief Inline function for sampling factors.
+   *
    * @param fcontinue_predicate Whether to skip the current split factor
    * @param fmax_extent Return the maximum extent
    * @param ffactor_to_assign Return the factor to assign
@@ -777,6 +778,45 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
           return split_steps_info[iter_id].max_extent;
         }
       );
+}
+
+
+const float DietCodeSplitFactorizationMemo::C_SAMPLE_PERFECT_TILES_PROB = 0.95;
+
+FactorizationScheme
+DietCodeSplitFactorizationMemo::SampleFactorizationScheme(
+      const std::vector<SplitStepInfo>& split_steps_info, std::mt19937* const rng
+    ) {
+  FactorizationScheme scheme;
+
+  for (size_t i = 0; i < split_steps_info.size(); ++i) {
+    scheme.split_factors.push_back(
+        std::vector<int>(split_steps_info[i].is_spatial ? 4 : 2, 1));
+  }
+  scheme.RandomSample(split_steps_info,
+                      hardware_params_,
+                      max_innermost_factor_,
+                      rng,
+                      false,  // do_mutation
+                      uniform_real_disb_(*rng) < C_SAMPLE_PERFECT_TILES_PROB);
+  return scheme;
+}
+
+FactorizationScheme
+DietCodeSplitFactorizationMemo::MutateFactorizationScheme(
+      const std::vector<SplitStepInfo>& split_steps_info,
+      std::mt19937* const rng,
+      const std::vector<std::vector<int>>& curr_split_factors
+    ) {
+  FactorizationScheme scheme;
+  scheme.split_factors = curr_split_factors;
+  scheme.RandomSample(split_steps_info,
+                      hardware_params_,
+                      max_innermost_factor_,
+                      rng,
+                      true,  // do_mutation
+                      uniform_real_disb_(*rng) < C_SAMPLE_PERFECT_TILES_PROB);
+  return scheme;
 }
 
 

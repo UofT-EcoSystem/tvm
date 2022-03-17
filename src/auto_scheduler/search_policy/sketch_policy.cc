@@ -60,9 +60,11 @@ static RuleSpecialComputeLocationGPU rule_special_compute_location_gpu;
 
 /********** Init population rules **********/
 static InitFillTileSize init_fill_tile_size;
+static InitFillDietCodeTileSizes init_fill_dietcode_tile_sizes;
 static InitChangeComputeLocation init_change_compute_location;
 static InitParallel init_parallel;
 static InitUnroll init_unroll;
+static InitDietCodeUnroll init_dietcode_unroll;
 static InitVectorization init_vectorization;
 static InitThreadBind init_thread_bind;
 
@@ -151,9 +153,17 @@ SketchPolicy::SketchPolicy(SearchTask task, CostModel program_cost_model,
     }
 
     // Initial Population Generation Rules
-    node->init_rules.push_back(&init_fill_tile_size);
+    if (IsDynTask(node->search_task)) {
+      node->init_rules.push_back(&init_fill_dietcode_tile_sizes);
+    } else {
+      node->init_rules.push_back(&init_fill_tile_size);
+    }
     node->init_rules.push_back(&init_thread_bind);
-    node->init_rules.push_back(&init_unroll);
+    if (IsDynTask(node->search_task)) {
+      node->init_rules.push_back(&init_dietcode_unroll);
+    } else {
+      node->init_rules.push_back(&init_unroll);
+    }
 
     if (node->search_task->target->GetAttr<String>("device", "") == "mali") {
       node->init_rules.push_back(&init_vectorization);
@@ -161,7 +171,7 @@ SketchPolicy::SketchPolicy(SearchTask task, CostModel program_cost_model,
 
     // Mutation Rules for Evolutionary Search
     if (IsDynTask(node->search_task)) {
-      node->mutation_rules.push_back(std::make_shared<MutateDietCodeTileSize>(1.0));
+      node->mutation_rules.push_back(std::make_shared<MutateDietCodeTileSizes>(1.0));
     } else {
       node->mutation_rules.push_back(std::make_shared<MutateTileSize>(0.90));
       node->mutation_rules.push_back(std::make_shared<MutateAutoUnroll>(0.10));
