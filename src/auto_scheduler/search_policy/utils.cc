@@ -781,7 +781,7 @@ void FactorizationScheme::RandomSample(const std::vector<SplitStepInfo>& split_s
 }
 
 
-const float DietCodeSplitFactorizationMemo::C_SAMPLE_PERFECT_TILES_PROB = 0.95;
+constexpr float C_SAMPLE_PERFECT_TILES_PROB = 0.95;
 
 FactorizationScheme
 DietCodeSplitFactorizationMemo::SampleFactorizationScheme(

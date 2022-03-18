@@ -610,7 +610,7 @@ std::vector<SplitStepInfo> GetSplitStepsInfoFromWklInsts(
   return split_steps_info;
 }
 
-size_t GetUnrollingLength(State* state) {
+size_t GetUnrollingLength(State* const state) {
   size_t unrolling_length = 1;
   for (size_t i = 0; i < (*state)->transform_steps.size(); ++i) {
     if (const SplitStepNode* const split_step =
@@ -1205,7 +1205,7 @@ PopulationGenerationRule::ResultKind MutateTileSize::Apply(SketchPolicyNode* pol
 
 namespace {
 
-void AdjustUnrollingFactor(State* state) {
+void AdjustUnrollingFactor(State* const state, StateNode* const pstate) {
   std::vector<int> pragma_steps;
   for (size_t i = 0; i < (*state)->transform_steps.size(); ++i) {
     if (auto ps = (*state)->transform_steps[i].as<PragmaStepNode>()) {
@@ -1226,7 +1226,6 @@ void AdjustUnrollingFactor(State* state) {
 
   size_t unrolling_length = GetUnrollingLength(state);
 
-  StateNode* pstate = state->CopyOnWrite();
   pstate->transform_steps.Set(
       step_id, PragmaStep(ps->stage_id, ps->iter_id,
                           std::string("auto_unroll_max_step") + "$"
@@ -1265,15 +1264,17 @@ MutateDietCodeTileSizes::Apply(SketchPolicyNode* policy, State* state,
     return ResultKind::kInvalid;
   }
 
-  // randomly choose an instance to optimize for, the probability, as is
-  // calculated in measure.cc, is based on the formula:
-  //
-  // flop * freq / thruput
+  // pick a workload instance to optimize for
+  Array<IntImm> wkl_inst =
+      policy->search_task->wkl_insts[
+        RandomChoose(policy->curr_inst_opt_prob, rand_gen)
+      ];
+
   std::vector<SplitStepInfo> split_steps_info =
       GetSplitStepsInfoFromWklInst(
         state, split_step_ids,
         policy->search_task->shape_vars.value(),
-        policy->search_task->wkl_insts[0]
+        wkl_inst
       );
 
   // Now that we have determined the optimization target, sample as if it is a
@@ -1299,7 +1300,7 @@ MutateDietCodeTileSizes::Apply(SketchPolicyNode* policy, State* state,
                     split_step->inner_to_outer)
         );
   }
-  AdjustUnrollingFactor(state);
+  AdjustUnrollingFactor(state, pstate);
   return ResultKind::kValid;
 }
 
