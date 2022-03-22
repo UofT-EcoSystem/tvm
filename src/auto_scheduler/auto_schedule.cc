@@ -26,6 +26,7 @@
 #include <tvm/runtime/registry.h>
 
 #include "utils.h"
+#include "search_policy/utils.h"
 
 namespace tvm {
 namespace auto_scheduler {
@@ -46,26 +47,40 @@ TuningOptions::TuningOptions(int num_measure_trials, int early_stopping, int num
   data_ = std::move(node);
 }
 
-std::pair<te::Schedule, Array<te::Tensor>> AutoSchedule(SearchPolicy search_policy,
-                                                        TuningOptions tuning_options) {
+ObjectRef AutoSchedule(SearchPolicy search_policy, TuningOptions tuning_options) {
   // Create a ProgramMeasurer to handle the schedule build and performance measure
   ProgramMeasurer measurer =
       ProgramMeasurer(tuning_options->builder, tuning_options->runner,
                       tuning_options->measure_callbacks, tuning_options->verbose);
-  // Search for the best schedule
-  State state =
-      search_policy->Search(tuning_options->num_measure_trials, tuning_options->early_stopping,
-                            tuning_options->num_measures_per_round, measurer);
-  if (state.defined()) {
-    return search_policy->search_task->compute_dag.ApplySteps(state->transform_steps);
+
+  std::vector<State> states;
+  std::unordered_map<size_t, size_t> inst_disp_map;
+  std::tie(states, inst_disp_map) =
+      search_policy->Search(tuning_options->num_measure_trials,
+                            tuning_options->early_stopping,
+                            tuning_options->num_measures_per_round,
+                            measurer);
+  // return a workload dispatcher in the case when the search task is dynamic
+  if (IsDynTask(search_policy->search_task)) {
+    return Dispatcher(search_policy->search_task,
+                      std::move(states),
+                      std::move(inst_disp_map));
   } else {
-    StdCout(tuning_options->verbose)
-        << "No valid state found in this search round. Check if it has traversed all of the "
-        << "search space." << std::endl;
-    // Return the default schedule
-    return {te::Schedule(search_policy->search_task->compute_dag->ops),
-            search_policy->search_task->compute_dag->tensors};
-  }
+    State state = Downcast<State>(states[0]);
+    if (state.defined()) {
+      std::pair<te::Schedule, Array<te::Tensor>> sch_and_tensors =
+          search_policy->search_task->compute_dag.ApplySteps(state->transform_steps);
+      return Array<ObjectRef>{
+               state, sch_and_tensors.first, sch_and_tensors.second
+             };
+    } else {
+      return Array<ObjectRef>{
+               search_policy->search_task->compute_dag->init_state,
+               te::Schedule(search_policy->search_task->compute_dag->ops),
+               search_policy->search_task->compute_dag->tensors
+             };
+    }
+  }  // if (IsDynTask(search_policy->search_task))
 }
 
 TVM_REGISTER_GLOBAL("auto_scheduler.TuningOptions")
