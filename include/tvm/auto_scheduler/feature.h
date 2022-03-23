@@ -40,15 +40,18 @@
 namespace tvm {
 namespace auto_scheduler {
 
-/*!
- * \brief Get per-store feature from a TIR Stmt
- * \param stmt The input lowered TIR statement
- * \param cache_line_size The size of cache line in bytes
- * \param max_n_bufs The maximum number of extracted buffers for one statement
- * \param ret The returned feature vector
+/**
+ * @brief Get per-store feature from a TIR Stmt
+ * @param stmt             input lowered TIR statement
+ * @param cache_line_size  size of cache line in bytes
+ * @param max_n_bufs       maximum number of extracted buffers for one statement
+ * @param is_dyn_task      whether the task is dynamic, in which case ignore
+ *                         blockIdx features
+ * @param ret              returned feature vector
  */
 void GetPerStoreFeature(const Stmt& stmt, int cache_line_size, int max_n_bufs,
-                        std::vector<float>* ret);
+                        std::vector<float>* ret,
+                        const bool is_dyn_task = false);
 
 /*
  * \brief Get the names of elements in the feature vector. Use this for debug and inspection.
