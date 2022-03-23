@@ -25,6 +25,7 @@
 #ifndef TVM_AUTO_SCHEDULER_MEASURE_RECORD_H_
 #define TVM_AUTO_SCHEDULER_MEASURE_RECORD_H_
 
+#include <tvm/auto_scheduler/dietcode.h>
 #include <tvm/auto_scheduler/measure.h>
 
 #include <fstream>
@@ -42,7 +43,8 @@ class RecordToFileNode : public MeasureCallbackNode {
   /*! \brief The name of output file. */
   String filename;
 
-  void Callback(const SearchPolicy& policy, const Array<MeasureInput>& inputs,
+  void Callback(const SearchPolicy& policy, const ProgramMeasurer& measurer,
+                const Array<MeasureInput>& inputs,
                 const Array<MeasureResult>& results) final;
 
   static constexpr const char* _type_key = "auto_scheduler.RecordToFile";
@@ -74,21 +76,20 @@ class RecordReaderNode : public Object {
 
   ~RecordReaderNode();
 
-  /*!
-   * \brief Read next line in the log file.
-   * \param inp A pointer to a MeasureInputNode, this is used as output.
-   * \param res A pointer to a MeasureResultNode, this is used as output.
-   * \return Whether the read is successful. */
-  bool ReadNext(MeasureInputNode* inp, MeasureResultNode* res);
-
-  /*!
-   * \brief Read multiple lines from the log file.
-   * \param max_size The maximum number of lines. -1 means read all lines.
-   * \param skip_size Skip the first n lines.
-   * \return The MeasureInputs and MeasureResults loaded from the log file.
+  /**
+   * @brief Read next line in the log file.
    */
-  std::pair<Array<MeasureInput>, Array<MeasureResult>> ReadLines(int max_size = -1,
-                                                                 int skip_size = 0);
+  ObjectRef ReadNext();
+
+  /**
+   * @brief   Read multiple lines from the log file.
+   * @param   max_size   maximum number of lines. -1 means read all lines.
+   * @param   skip_size  skip the first n lines.
+   * @return  The MeasureInputs, MeasureResults, and DietCodeDispatcher loaded
+   *          from the log file.
+   */
+  std::tuple<Array<MeasureInput>, Array<MeasureResult>, Array<DietCodeDispatcher>>
+  ReadLines(int max_size = -1, int skip_size = 0);
 
   static constexpr const char* _type_key = "auto_scheduler.RecordReader";
   TVM_DECLARE_FINAL_OBJECT_INFO(RecordReaderNode, Object);
@@ -124,15 +125,10 @@ void WriteMeasureRecords(std::ostream* os, const Array<MeasureInput>& inputs,
                          const Array<MeasureResult>& results,
                          const std::string log_version = AUTO_SCHEDULER_LOG_VERSION);
 
-/*!
- * \brief Read one measure record from a string.
- * \param str The record string to be parsed.
- * \param inp A pointer to a MeasureInputNode used to store the return value.
- * \param res A pointer to a MeasureResultNode used to store the return value.
- * \param log_version A pointer to a string used to store the log version.
+/**
+ * @brief Read one measure record from a string.
  */
-void ReadMeasureRecord(const std::string& str, MeasureInputNode* inp, MeasureResultNode* res,
-                       std::string* log_version);
+ObjectRef ReadMeasureRecord(const std::string& str);
 
 }  // namespace auto_scheduler
 }  // namespace tvm

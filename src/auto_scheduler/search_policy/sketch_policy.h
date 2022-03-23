@@ -113,10 +113,11 @@ class SketchPolicyNode : public SearchPolicyNode {
   /*! \brief DietCode Split Factorization Cache */
   DietCodeSplitFactorizationMemo dietcode_split_memo;
 
-  State Search(int num_measure_trials, int early_stopping, int num_measures_per_round,
-               ProgramMeasurer measurer) final;
+  std::pair<std::vector<State>, std::unordered_map<size_t, size_t>>
+  Search(int num_measure_trials, int early_stopping, int num_measures_per_round,
+         ProgramMeasurer measurer) final;
 
-  std::pair<Array<MeasureInput>, Array<MeasureResult>> ContinueSearchOneRound(
+  std::pair<int, float> ContinueSearchOneRound(
       int num_measure, ProgramMeasurer measurer) final;
 
   /*!

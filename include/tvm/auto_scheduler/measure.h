@@ -224,7 +224,8 @@ class MeasureCallbackNode : public Object {
    * \param inputs An Array of MeasureInput.
    * \param results An Array of MeasureResult.
    */
-  virtual void Callback(const SearchPolicy& policy, const Array<MeasureInput>& inputs,
+  virtual void Callback(const SearchPolicy& policy, const ProgramMeasurer& measurer,
+                        const Array<MeasureInput>& inputs,
                         const Array<MeasureResult>& results) = 0;
   static constexpr const char* _type_key = "auto_scheduler.MeasureCallback";
   TVM_DECLARE_BASE_OBJECT_INFO(MeasureCallbackNode, Object);
@@ -246,7 +247,8 @@ class PythonBasedMeasureCallbackNode : public MeasureCallbackNode {
   /*! \brief Pointer to the callback funcion in python */
   PackedFunc callback_func;
 
-  void Callback(const SearchPolicy& policy, const Array<MeasureInput>& inputs,
+  void Callback(const SearchPolicy& policy, const ProgramMeasurer& measurer,
+                const Array<MeasureInput>& inputs,
                 const Array<MeasureResult>& results) final;
   static constexpr const char* _type_key = "auto_scheduler.PythonBasedMeasureCallback";
   TVM_DECLARE_FINAL_OBJECT_INFO(PythonBasedMeasureCallbackNode, MeasureCallbackNode);
