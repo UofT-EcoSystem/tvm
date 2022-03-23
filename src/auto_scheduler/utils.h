@@ -26,6 +26,7 @@
 #define TVM_AUTO_SCHEDULER_UTILS_H_
 
 #include <dmlc/common.h>
+#include <tvm/runtime/ndarray.h>
 #include <tvm/tir/expr.h>
 
 #include <algorithm>
@@ -128,6 +129,36 @@ inline Array<PrimExpr> ToPrimExprArray(const Array<T>& a) {
     exprs.push_back(t);
   }
   return exprs;
+}
+
+template<typename T>
+inline std::vector<size_t> UnpackVectorShape(const std::vector<T>& vec) {
+  return {vec.size()};
+}
+
+template<typename T>
+inline std::vector<size_t> UnpackVectorShape(const std::vector<std::vector<T>>& vec) {
+  CHECK(vec.size() > 0);
+  std::vector<size_t> subvec_shape = UnpackVectorShape(vec[0]);
+  subvec_shape.insert(subvec_shape.begin(), vec.size());
+  return subvec_shape;
+}
+
+using ::tvm::runtime::NDArray;
+
+template<typename T>
+inline NDArray ToNDArray(const std::vector<T>& vec, std::vector<size_t> shape = {},
+                         const DataType data_type = DataType::Float(32)) {
+  if (shape.empty()) {
+    shape = UnpackVectorShape(vec);
+  }
+  size_t vec_size = 1;
+  for (const size_t s : shape) {
+    vec_size *= s;
+  }
+  NDArray ret = NDArray::Empty(shape, data_type, Device{kDLCPU, 0});
+  ret.CopyFromBytes(vec.data(), sizeof(int) * vec_size);
+  return ret;
 }
 
 /*! \brief Move elements from multiple vectors to one vector */
