@@ -212,6 +212,10 @@ enum class LayoutRewriteOption : int {
   RewriteForPreTransformed = 2,
 };
 
+class HardwareParams;
+class SearchTask;
+class DynShapeVarReplacer;
+
 /*!
  * \brief Managed reference to ComputeDAGNode.
  * \sa ComputeDAGNode
@@ -268,6 +272,39 @@ class ComputeDAG : public ObjectRef {
    * \return The ComputeDAG in a string.
    */
   String PrintDAG(bool simple_mode = false) const;
+
+ private:
+  std::pair<te::Schedule, Array<te::Tensor>>
+  InstantiateAndApplySteps(const State& state, DynShapeVarReplacer& replacer,
+                           Array<te::Stage>* stages,
+                           StageToAxesMap* stage_to_axes) const;
+
+ public:
+  /**
+   * @brief   Pick a workload instance that has the smallest occupancy penalty
+   *          on the given state.
+   * @return  A tuple, 1st is the returned workload instance, 2nd is the number
+   *          of compute operations, 3rd is the occupancy penalty
+   * @sa      CherryPickWklInstAndApplySteps
+   */
+  std::tuple<Array<IntImm>, double, float>
+  CherryPickWklInst(const State& state, const SearchTask& task) const;
+  /**
+   * @brief   Pick a workload instance that has the smallest occupancy penalty
+   *          on the given state and apply the transformation steps to obtain
+   *          the schedule and tensors.
+   * @return  A pair, 1st is the generated schedule, 2nd is the tensors
+   * @sa      CherryPickWklInst
+   */
+  std::pair<te::Schedule, Array<te::Tensor>>
+  CherryPickWklInstAndApplySteps(const State& state, const SearchTask& task) const;
+  /**
+   * @brief   Instantiate the given state on the given workload instance.
+   * @return  A pair, 1st is the generated schedule, 2nd is the tensors
+   */
+  std::pair<te::Schedule, Array<te::Tensor>>
+  InstantiateAndApplySteps(const State& state, const Array<Var>& shape_vars,
+                           const Array<PrimExpr>& shape_values) const;
 
   /*!
    * \brief Fill the correct bound information for a given state by calling ir_pass::InferBound.

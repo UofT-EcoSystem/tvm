@@ -96,8 +96,7 @@ class TuningOptions : public ObjectRef {
  * \return A `te::schedule` and an Array of `te::Tensor` to be used in `tvm.lower` or
  * `tvm.build`.
  */
-TVM_DLL std::pair<te::Schedule, Array<te::Tensor>> AutoSchedule(SearchPolicy search_policy,
-                                                                TuningOptions tuning_options);
+TVM_DLL ObjectRef AutoSchedule(SearchPolicy search_policy, TuningOptions tuning_options);
 }  // namespace auto_scheduler
 }  // namespace tvm
 

@@ -43,11 +43,12 @@ namespace auto_scheduler {
  */
 class EmptyPolicyNode : public SearchPolicyNode {
  public:
-  State Search(int num_measure_trials, int early_stopping, int num_measures_per_round,
-               ProgramMeasurer measurer) final;
+  std::pair<std::vector<State>, std::unordered_map<size_t, size_t>>
+  Search(int num_measure_trials, int early_stopping, int num_measures_per_round,
+         ProgramMeasurer measurer) final;
 
-  std::pair<Array<MeasureInput>, Array<MeasureResult>> ContinueSearchOneRound(
-      int num_measure, ProgramMeasurer measurer) final;
+  std::pair<int, float>
+  ContinueSearchOneRound(int num_measure, ProgramMeasurer measurer) final;
 
   static constexpr const char* _type_key = "auto_scheduler.EmptyPolicy";
   TVM_DECLARE_FINAL_OBJECT_INFO(EmptyPolicyNode, SearchPolicyNode);

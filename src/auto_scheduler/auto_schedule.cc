@@ -23,6 +23,7 @@
  */
 
 #include <tvm/auto_scheduler/auto_schedule.h>
+#include <tvm/auto_scheduler/dietcode.h>
 #include <tvm/runtime/registry.h>
 
 #include "utils.h"
@@ -62,9 +63,8 @@ ObjectRef AutoSchedule(SearchPolicy search_policy, TuningOptions tuning_options)
                             measurer);
   // return a workload dispatcher in the case when the search task is dynamic
   if (IsDynTask(search_policy->search_task)) {
-    return Dispatcher(search_policy->search_task,
-                      std::move(states),
-                      std::move(inst_disp_map));
+    return DietCodeDispatcher(search_policy->search_task, std::move(states),
+                              std::move(inst_disp_map));
   } else {
     State state = Downcast<State>(states[0]);
     if (state.defined()) {
@@ -93,10 +93,7 @@ TVM_REGISTER_GLOBAL("auto_scheduler.TuningOptions")
 
 TVM_REGISTER_GLOBAL("auto_scheduler.AutoSchedule")
     .set_body_typed([](SearchPolicy search_policy, TuningOptions tuning_options) {
-      te::Schedule sch;
-      Array<te::Tensor> return_tensors;
-      std::tie(sch, return_tensors) = AutoSchedule(search_policy, tuning_options);
-      return Array<ObjectRef>{sch, return_tensors};
+      return AutoSchedule(search_policy, tuning_options);
     });
 }  // namespace auto_scheduler
 }  // namespace tvm

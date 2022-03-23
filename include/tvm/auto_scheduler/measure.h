@@ -50,6 +50,7 @@ namespace tvm {
 namespace auto_scheduler {
 
 class SearchPolicy;
+class ProgramMeasurer;
 class MeasureInput;
 class MeasureResult;
 
@@ -85,9 +86,15 @@ class MeasureInputNode : public Object {
   /*! \brief The program state to be measured. */
   State state;
 
+  /**
+   * @brief [Optional] workload instance to measure
+   */
+  Optional<Array<IntImm>> wkl_inst;
+
   void VisitAttrs(tvm::AttrVisitor* v) {
     v->Visit("task", &task);
     v->Visit("state", &state);
+    v->Visit("wkl_inst", &wkl_inst);
   }
 
   /*! \brief Do shallow copy. */
@@ -108,7 +115,7 @@ class MeasureInput : public ObjectRef {
    * \param task The SearchTask of this measure.
    * \param state The State to be measured.
    */
-  MeasureInput(SearchTask task, State state);
+  MeasureInput(SearchTask task, State state, Optional<Array<IntImm>> wkl_inst = NullOpt);
 
   TVM_DEFINE_OBJECT_REF_METHODS(MeasureInput, ObjectRef, MeasureInputNode);
 };
@@ -460,10 +467,21 @@ class ProgramMeasurerNode : public Object {
   int ct;
   /*! \brief Continuous error counter. */
   int error_ct;
-  /*! \brief Workload key to best flops map. */
-  std::unordered_map<std::string, double> best_flops;
-  /*! \brief Workload key to best state map. */
-  std::unordered_map<std::string, State> best_state;
+  
+  /**
+   * @defgroup Best Records
+   * @{
+   */
+  std::unordered_map<std::string, double> best_score;
+  std::unordered_map<std::string, std::vector<State>> best_states;
+  std::unordered_map<std::string, std::unordered_map<size_t, size_t>>
+      best_wkl_inst_disp_map;
+  std::unordered_map<std::string, std::vector<float>> best_state_flops;
+  std::unordered_map<std::string, std::vector<float>> best_wkl_inst_flops;
+  /**
+   * @}
+   */
+  
   /*! \brief Workload key to best state's count index map. */
   std::unordered_map<std::string, int> best_ct;
   /*! \brief The set of workloads that have at least one valid schedule */

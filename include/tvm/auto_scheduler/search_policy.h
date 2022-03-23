@@ -136,31 +136,40 @@ class SearchPolicyNode : public Object {
    */
   int verbose;
 
+  /**
+   * @brief Current optimization probability ∀workload instance
+   */
+  std::vector<double> curr_wkl_inst_opt_prob;
+
   void VisitAttrs(AttrVisitor* v) {
     v->Visit("search_task", &search_task);
     v->Visit("verbose", &verbose);
   }
 
-  /*!
-   * \brief Do schedule search for a task. Takes the SearchTask as input and returns the best state
-   * found during the search.
-   * \param num_measure_trials The number of total measurement trials.
-   * \param early_stopping Stops the tuning early if no improvement after n measurements.
-   * \param num_measures_per_round  The number of programs to be measured at each search round.
-   * \param measurer A ProgramMeasurer to build and measure programs
-   * \return The best state found.
+  /**
+   * @brief   Do schedule search for a task. Takes the SearchTask as input and
+   *          returns the best state found during the search.
+   * @param   num_measure_trials      number of total measurement trials
+   * @param   early_stopping          stops the tuning early if no improvement
+   *                                  after n measurements
+   * @param   num_measures_per_round  number of programs to be measured at each
+   *                                  search round.
+   * @param   measurer a ProgramMeasurer to build and measure programs
+   * @return  The list of best states found + The index dispatch map from
+   *          workload instances to those states
    */
-  virtual State Search(int num_measure_trials, int early_stopping, int num_measures_per_round,
-                       ProgramMeasurer measurer) = 0;
+  virtual std::pair<std::vector<State>, std::unordered_map<size_t, size_t>>
+  Search(int num_measure_trials, int early_stopping, int num_measures_per_round,
+         ProgramMeasurer measurer) = 0;
 
-  /*!
-   * \brief Continue the search by doing an additional search round.
-   * \param num_measure The number of measurements
-   * \param measurer The measurer to measure programs
-   * \return The measurement records for measurements in this search round
+  /**
+   * @brief   Continue the search by doing an additional search round.
+   * @param   num_measure  number of measurements
+   * @param   measurer     measurer to measure programs
+   * @return  The number of measure inputs and the FLOPs-weighted latency
    */
-  virtual std::pair<Array<MeasureInput>, Array<MeasureResult>> ContinueSearchOneRound(
-      int num_measure, ProgramMeasurer measurer) = 0;
+  virtual std::pair<int, float>
+  ContinueSearchOneRound(int num_measure, ProgramMeasurer measurer) = 0;
 
   /*!
    * \brief Preload measured states from a log file to resume the state of the search policy.

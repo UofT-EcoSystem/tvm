@@ -50,16 +50,16 @@ EmptyPolicy::EmptyPolicy(SearchTask task, Optional<Array<SearchCallback>> init_s
   data_ = std::move(node);
 }
 
-State EmptyPolicyNode::Search(int num_measure_trials, int early_stopping,
-                              int num_measures_per_round, ProgramMeasurer measurer) {
+std::pair<std::vector<State>, std::unordered_map<size_t, size_t>>
+EmptyPolicyNode::Search(int num_measure_trials, int early_stopping,
+                        int num_measures_per_round, ProgramMeasurer measurer) {
   // Basic design principe: `SearchOneRound()` several times to get candidate states,
   // measure them and return the best one
   // Measure is disabled if num_measure_trials <= 1
   if (num_measure_trials <= 1) {
     const auto& res = SearchOneRound();
     ICHECK_GT(res.size(), 0);
-
-    return res[0];
+    return std::make_pair(std::vector<State>{res[0]}, std::unordered_map<size_t, size_t>{});
   } else {
     Array<MeasureInput> inputs;
     Array<MeasureResult> results;
@@ -82,11 +82,14 @@ State EmptyPolicyNode::Search(int num_measure_trials, int early_stopping,
     }
 
     // Return a state with best measured performance
-    return measurer->best_state[search_task->workload_key];
+    return std::make_pair(
+             measurer->best_states[search_task->workload_key],
+             measurer->best_wkl_inst_disp_map[search_task->workload_key]
+           );
   }
 }
 
-std::pair<Array<MeasureInput>, Array<MeasureResult>> EmptyPolicyNode::ContinueSearchOneRound(
+std::pair<int, float> EmptyPolicyNode::ContinueSearchOneRound(
     int num_measure, ProgramMeasurer measurer) {
   Array<State> best_states;
   Array<MeasureInput> inputs;
@@ -103,7 +106,11 @@ std::pair<Array<MeasureInput>, Array<MeasureResult>> EmptyPolicyNode::ContinueSe
   }
   results = measurer->Measure(search_task, GetRef<SearchPolicy>(this), inputs);
 
-  return std::make_pair(std::move(inputs), std::move(results));
+  return std::make_pair<int, float>(
+           inputs.size(),
+           search_task->compute_dag->flop_ct
+             / measurer->best_score[search_task->workload_key]
+         );
 }
 
 // As an example policy, EmptyPolicy always returns a init state

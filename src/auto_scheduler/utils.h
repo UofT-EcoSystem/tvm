@@ -121,6 +121,15 @@ inline int64_t ElementProduct(const std::vector<int>& array) {
   return ret;
 }
 
+template<typename T>
+inline Array<PrimExpr> ToPrimExprArray(const Array<T>& a) {
+  Array<PrimExpr> exprs;
+  for (const T& t : a) {
+    exprs.push_back(t);
+  }
+  return exprs;
+}
+
 /*! \brief Move elements from multiple vectors to one vector */
 template <typename T>
 std::vector<T>& ConcatenateMove(std::vector<T>* out, std::vector<T>* in) {
