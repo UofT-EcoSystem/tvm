@@ -132,15 +132,35 @@ inline Array<PrimExpr> ToPrimExprArray(const Array<T>& a) {
 }
 
 template<typename T>
-inline std::vector<size_t> UnpackVectorShape(const std::vector<T>& vec) {
-  return {vec.size()};
+struct VectorStripper {
+  typedef T type;
+};
+
+template<typename T>
+struct VectorStripper<std::vector<T>> {
+  typedef typename VectorStripper<T>::type type;
+};
+
+template<typename T>
+inline std::tuple<typename VectorStripper<T>::type,
+                  size_t,
+                  std::vector<size_t>>
+UnpackVector(const std::vector<T>& vec) {
+  return {vec, vec.size(), {vec.size()}};
 }
 
 template<typename T>
-inline std::vector<size_t> UnpackVectorShape(const std::vector<std::vector<T>>& vec) {
+inline std::tuple<typename VectorStripper<T>::type,
+                  size_t,
+                  std::vector<size_t>>
+UnpackVector(const std::vector<std::vector<T>>& vec) {
   CHECK(vec.size() > 0);
-  std::vector<size_t> subvec_shape = UnpackVectorShape(vec[0]);
-  subvec_shape.insert(subvec_shape.begin(), vec.size());
+  std::vector<typename VectorStripper<T>::type> unpacked_subvec;
+  size_t subvec_size;
+  std::vector<size_t> subvec_shape;
+  std::tie(unpacked_subvec, subvec_size, subvec_shape) = UnpackVector(vec[0]);
+
+
   return subvec_shape;
 }
 
