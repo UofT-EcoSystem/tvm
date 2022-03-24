@@ -1,4 +1,5 @@
 #include <tvm/arith/analyzer.h>
+#include <tvm/arith/int_set.h>
 
 #include "./dyn_shape_var.h"
 

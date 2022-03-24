@@ -1021,7 +1021,7 @@ class PerStoreFeatureExtractor : public StmtExprVisitor {
 inline float slog(float x) { return x < 0 ? -std::log2(-x + 1) : std::log2(x + 1); }
 
 void GetPerStoreFeature(const Stmt& stmt, int cache_line_size, int max_n_bufs,
-                        std::vector<float>* ret) {
+                        std::vector<float>* ret, const bool is_dyn_task) {
   PerStoreFeatureExtractor extractor(cache_line_size);
   extractor(stmt);
 
@@ -1070,9 +1070,15 @@ void GetPerStoreFeature(const Stmt& stmt, int cache_line_size, int max_n_bufs,
     }
 
     ret->push_back(fea_set.is_gpu);
-    ret->push_back(slog(fea_set.blockIdx_x_len));
-    ret->push_back(slog(fea_set.blockIdx_y_len));
-    ret->push_back(slog(fea_set.blockIdx_z_len));
+    if (is_dyn_task) {
+      ret->push_back(1.f);
+      ret->push_back(1.f);
+      ret->push_back(1.f);
+    } else {
+      ret->push_back(slog(fea_set.blockIdx_x_len));
+      ret->push_back(slog(fea_set.blockIdx_y_len));
+      ret->push_back(slog(fea_set.blockIdx_z_len));
+    }
     ret->push_back(slog(fea_set.threadIdx_x_len));
     ret->push_back(slog(fea_set.threadIdx_y_len));
     ret->push_back(slog(fea_set.threadIdx_z_len));
@@ -1153,7 +1159,11 @@ void GetPerStoreFeature(const Stmt& stmt, int cache_line_size, int max_n_bufs,
     /***** Group 5: Outer scope related features *****/
     ret->push_back(slog(fea_set.outer_prod));
     ret->push_back(slog(fea_set.num_loops));
-    ret->push_back(slog(fea_set.auto_unroll_max_step));
+    if (is_dyn_task) {
+      ret->push_back(1.f);
+    } else {
+      ret->push_back(slog(fea_set.auto_unroll_max_step));
+    }
   }
 }
 

@@ -44,6 +44,10 @@
 #include <vector>
 
 namespace tvm {
+namespace tir {
+class DynShapeVarReplacer;
+}  // namespace tir
+
 namespace auto_scheduler {
 
 /*! \brief Static analyzer for a ComputeDAG */
@@ -214,7 +218,7 @@ enum class LayoutRewriteOption : int {
 
 class HardwareParams;
 class SearchTask;
-class DynShapeVarReplacer;
+using tir::DynShapeVarReplacer;
 
 /*!
  * \brief Managed reference to ComputeDAGNode.

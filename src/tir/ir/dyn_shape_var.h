@@ -1,9 +1,12 @@
 #pragma once
 
-#include <tvm/arith/int_set.h>
 #include <tvm/tir/stmt_functor.h>
 
 namespace tvm {
+namespace arith {
+class IntSet;
+}  // namespace arith
+
 namespace tir {
 
 class DynShapeVarReplacer : public StmtExprMutator {
@@ -18,7 +21,7 @@ class DynShapeVarReplacer : public StmtExprMutator {
     }
   }
  public:
-  explicit DynShapeVarReplacer(std::function<PrimExpr(const VarNode*)> freplace_expr)
+  explicit DynShapeVarReplacer(std::function<PrimExpr(const VarNode*)> freplace_expr = nullptr)
       : freplace_expr_(freplace_expr) {}
 };
 

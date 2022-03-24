@@ -169,7 +169,7 @@ UnpackVector(const std::vector<std::vector<T>>& vec) {
 
   for (size_t i = 1; i < vec.size(); ++i) {
     std::tie(flattened_subvec, subvec_size, subvec_shape) = UnpackVector(vec[i]);
-    CHECK(subvec0_shape.size() == subvec_shape.size())
+    CHECK(subvec0_shape.size() == subvec_shape.size());
     for (size_t j = 0; j < subvec_shape.size(); ++j) {
       CHECK(subvec0_shape[j] == subvec_shape[j]);
     }
@@ -179,6 +179,15 @@ UnpackVector(const std::vector<std::vector<T>>& vec) {
   }
   subvec0_shape.insert(subvec0_shape.begin(), vec.size());
   return {flattened_subvec0, subvec0_size, subvec0_shape};
+}
+
+template<typename T>
+inline std::vector<int64_t> ToInt64(const std::vector<T>& vec) {
+  std::vector<int64_t> int64_vec(vec.size());
+  for (size_t i = 0; i < vec.size(); ++i) {
+    int64_vec[i] = vec[i];
+  }
+  return int64_vec;
 }
 
 using ::tvm::runtime::NDArray;
@@ -194,7 +203,7 @@ inline NDArray ToNDArray(const std::vector<T>& vec, std::vector<size_t> shape = 
   if (shape.empty()) {
     shape = vec_shape;
   }
-  NDArray ret = NDArray::Empty(shape, data_type, Device{kDLCPU, 0});
+  NDArray ret = NDArray::Empty(ToInt64(shape), data_type, Device{kDLCPU, 0});
   ret.CopyFromBytes(flattened_vec.data(), sizeof(int) * vec_size);
   return ret;
 }
@@ -390,7 +399,9 @@ inline void ParseKernelLayout(const String& layout, Array<PrimExpr>* shape,
 /*! \brief Get the base name before '_' of an axis */
 inline std::string AxisBaseName(const std::string& str) { return str.substr(0, str.rfind("_")); }
 
-using namespace ::tvm::tir;
+using te::Operation;
+using tir::DynShapeVarReplacer;
+using tir::ExprFunctor;
 
 class FlopEstimator : public ExprFunctor<double(const PrimExpr& n)> {
  public:
@@ -472,6 +483,9 @@ class FlopEstimator : public ExprFunctor<double(const PrimExpr& n)> {
   VisitBinary(AndNode);
   VisitBinary(OrNode);
   VisitUnary(NotNode);
+
+#undef VisitBinary
+#undef VisitUnary
 
   double VisitExpr_(const CallNode* op) final {
     double ret = 0.0;
