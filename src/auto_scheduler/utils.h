@@ -26,8 +26,13 @@
 #define TVM_AUTO_SCHEDULER_UTILS_H_
 
 #include <dmlc/common.h>
+#include <tvm/arith/analyzer.h>
 #include <tvm/runtime/ndarray.h>
+#include <tvm/te/operation.h>
 #include <tvm/tir/expr.h>
+#include <tvm/tir/expr_functor.h>
+
+#include "../tir/ir/dyn_shape_var.h"
 
 #include <algorithm>
 #include <deque>
@@ -384,6 +389,109 @@ inline void ParseKernelLayout(const String& layout, Array<PrimExpr>* shape,
 
 /*! \brief Get the base name before '_' of an axis */
 inline std::string AxisBaseName(const std::string& str) { return str.substr(0, str.rfind("_")); }
+
+using namespace ::tvm::tir;
+
+class FlopEstimator : public ExprFunctor<double(const PrimExpr& n)> {
+ public:
+  FlopEstimator(const DynShapeVarReplacer& replacer = DynShapeVarReplacer(nullptr))
+      : replacer_(replacer) {}
+
+ private:
+  int64_t AxisLengthProd(const Array<tir::IterVar>& axes);
+
+ public:
+  double EstimateFlop(const Array<te::Operation>& ops);
+
+  double VisitExpr_(const ReduceNode* op) final {
+    uint64_t num_iter = 1;
+    for (const auto& x : op->axis) {
+      if (auto imm = x->dom->extent.as<IntImmNode>()) {
+        num_iter *= imm->value;
+      } else {
+        if (const IntImmNode* const imm =
+              analyzer_.Simplify(replacer_(x->dom->extent)).as<IntImmNode>()) {
+          num_iter *= imm->value;
+        } else {
+          fail_ = true;
+          num_iter = -1;
+        }
+      }
+    }
+    double body_flop = 0;
+    for (size_t i = 0; i < op->combiner->result.size(); ++i) {
+      body_flop += VisitExpr(op->combiner->result[i]);
+      body_flop += VisitExpr(op->source[i]);
+    }
+    return num_iter * body_flop;
+  }
+
+  double VisitExpr_(const FloatImmNode* op) final { return 0.0; }
+  double VisitExpr_(const IntImmNode* op) final { return 0.0; }
+  double VisitExpr_(const ProducerLoadNode* op) final { return 0.0; }
+
+  double VisitExpr_(const CastNode* op) final { return VisitExpr(op->value); }
+  double VisitExpr_(const VarNode* op) final { return 0.0; }
+
+  double VisitExpr_(const SelectNode* op) final {
+    return VisitExpr(op->condition) +
+           std::max(VisitExpr(op->true_value), VisitExpr(op->false_value));
+  }
+
+// Index calculations (e.g., the "i + j" expression in A[i + j]) are not counted in FLOPS.
+#define VisitBinary(Node)                                                                     \
+  double VisitExpr_(const Node* op) final {                                                   \
+    double base = 1.0;                                                                        \
+    if ((op->a->dtype.code() != cur_type_code_) && (op->b->dtype.code() != cur_type_code_)) { \
+      base = 0.0;                                                                             \
+    }                                                                                         \
+    return base + VisitExpr(op->a) + VisitExpr(op->b);                                        \
+  }
+
+#define VisitUnary(Node)                                          \
+  double VisitExpr_(const Node* op) final {                       \
+    double base = op->dtype.code() == cur_type_code_ ? 1.0 : 0.0; \
+    return base + VisitExpr(op->a);                               \
+  }
+
+  VisitBinary(AddNode);
+  VisitBinary(SubNode);
+  VisitBinary(MulNode);
+  VisitBinary(DivNode);
+  VisitBinary(ModNode);
+  VisitBinary(FloorDivNode);
+  VisitBinary(FloorModNode);
+  VisitBinary(MaxNode);
+  VisitBinary(MinNode);
+  VisitBinary(EQNode);
+  VisitBinary(NENode);
+  VisitBinary(LTNode);
+  VisitBinary(LENode);
+  VisitBinary(GTNode);
+  VisitBinary(GENode);
+  VisitBinary(AndNode);
+  VisitBinary(OrNode);
+  VisitUnary(NotNode);
+
+  double VisitExpr_(const CallNode* op) final {
+    double ret = 0.0;
+    for (const auto& x : op->args) {
+      ret += VisitExpr(x);
+    }
+    return ret;
+  }
+
+  double VisitExprDefault_(const Object* op) final {
+    fail_ = true;
+    return -1.0;
+  }
+
+ private:
+  arith::Analyzer analyzer_;
+  DynShapeVarReplacer replacer_;
+  bool fail_{false};
+  int cur_type_code_;
+};
 
 }  // namespace auto_scheduler
 }  // namespace tvm
