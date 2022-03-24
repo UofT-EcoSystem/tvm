@@ -22,22 +22,21 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
       }
     );
 
-
 Map<Integer, Integer> DietCodeDispatcherNode::GetWklInstDispMap() const {
-  Map<Integer, Integer> wkl_inst_disp_map_;
-  for (const auto& kv : wkl_inst_disp_map) {
-    wkl_inst_disp_map_.Set(kv.first, kv.second);
+  Map<Integer, Integer> wkl_inst_id_disp_map_;
+  for (const auto& kv : wkl_inst_id_disp_map) {
+    wkl_inst_id_disp_map_.Set(Integer(kv.first), Integer(kv.second));
   }
-  return wkl_inst_disp_map_;
+  return wkl_inst_id_disp_map_;
 }
 
 DietCodeDispatcher::DietCodeDispatcher(
     const SearchTask& search_task, std::vector<State>&& states,
-    std::unordered_map<size_t, size_t>&& wkl_inst_disp_map) {
+    std::unordered_map<size_t, size_t>&& wkl_inst_id_disp_map) {
   ObjectPtr<DietCodeDispatcherNode> node = make_object<DietCodeDispatcherNode>();
   node->search_task = search_task;
   node->states = std::move(states);
-  node->wkl_inst_disp_map = std::move(wkl_inst_disp_map);
+  node->wkl_inst_id_disp_map = std::move(wkl_inst_id_disp_map);
   data_ = std::move(node);
 }
 
@@ -51,7 +50,7 @@ DietCodeDispatcherNode::DispatchAndApplySteps(const int wkl_inst_id) const {
 }
 
 State DietCodeDispatcherNode::Dispatch(const int wkl_inst_id) const {
-  return states[wkl_inst_disp_map.at(wkl_inst_id)];
+  return states[wkl_inst_id_disp_map.at(wkl_inst_id)];
 }
 
 TVM_REGISTER_GLOBAL("auto_scheduler.DispatcherStates")
@@ -60,9 +59,9 @@ TVM_REGISTER_GLOBAL("auto_scheduler.DispatcherStates")
     });
 
 
-TVM_REGISTER_GLOBAL("auto_scheduler.DispatcherInstDispMap")
+TVM_REGISTER_GLOBAL("auto_scheduler.DispatcherWklInstIdDispMap")
     .set_body_typed([](const DietCodeDispatcher& dispatcher) {
-      return dispatcher->GetWklInstDispMap();
+      return dispatcher->GetWklInstIdDispMap();
     });
 
 }  // namespace auto_scheduler

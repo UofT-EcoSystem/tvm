@@ -11,14 +11,14 @@ namespace auto_scheduler {
 struct DietCodeDispatcherNode : Object {
   SearchTask search_task;
   std::vector<State> states;
-  std::unordered_map<size_t, size_t> wkl_inst_disp_map;
+  std::unordered_map<size_t, size_t> wkl_inst_id_disp_map;
 
   void VisitAttrs(tvm::AttrVisitor* v) {
     v->Visit("search_task", &search_task);
   }
   
   Array<State> GetStates() const { return Array<State>(states); }
-  Map<Integer, Integer> GetWklInstDispMap() const;
+  Map<Integer, Integer> GetWklInstIdDispMap() const;
 
   /**
    * @brief   Dispatch to an auto-scheduler state based on the given workload
@@ -44,13 +44,13 @@ class DietCodeDispatcher : public ObjectRef {
   /**
    * @brief DietCode Dispatcher that dispatches workload instances to
    *        auto-scheduler states
-   * @param search_task        dynamic search task
-   * @param states             auto-scheduler states
-   * @param wkl_inst_disp_map  index mapping from auto-scheduler states to
-   *                           workload instances
+   * @param search_task           dynamic search task
+   * @param states                auto-scheduler states
+   * @param wkl_inst_id_disp_map  index mapping from auto-scheduler states to
+   *                              workload instances
    */
   DietCodeDispatcher(const SearchTask& search_task, std::vector<State>&& states,
-                     std::unordered_map<size_t, size_t>&& wkl_inst_disp_map);
+                     std::unordered_map<size_t, size_t>&& wkl_inst_id_disp_map);
   TVM_DEFINE_OBJECT_REF_METHODS(DietCodeDispatcher, ObjectRef,
                                 DietCodeDispatcherNode);
   TVM_DEFINE_OBJECT_REF_COW_METHOD(DietCodeDispatcherNode);
