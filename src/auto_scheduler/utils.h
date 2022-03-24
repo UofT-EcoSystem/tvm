@@ -142,7 +142,7 @@ struct VectorStripper<std::vector<T>> {
 };
 
 template<typename T>
-inline std::tuple<typename VectorStripper<T>::type,
+inline std::tuple<std::vector<typename VectorStripper<T>::type>,
                   size_t,
                   std::vector<size_t>>
 UnpackVector(const std::vector<T>& vec) {
@@ -150,18 +150,30 @@ UnpackVector(const std::vector<T>& vec) {
 }
 
 template<typename T>
-inline std::tuple<typename VectorStripper<T>::type,
+inline std::tuple<std::vector<typename VectorStripper<T>::type>,
                   size_t,
                   std::vector<size_t>>
 UnpackVector(const std::vector<std::vector<T>>& vec) {
   CHECK(vec.size() > 0);
-  std::vector<typename VectorStripper<T>::type> unpacked_subvec;
-  size_t subvec_size;
-  std::vector<size_t> subvec_shape;
-  std::tie(unpacked_subvec, subvec_size, subvec_shape) = UnpackVector(vec[0]);
+  std::vector<typename VectorStripper<T>::type> flattened_subvec0,
+                                                flattened_subvec;
+  size_t subvec0_size, subvec_size;
+  std::vector<size_t> subvec0_shape, subvec_shape;
 
+  std::tie(flattened_subvec0, subvec0_size, subvec0_shape) = UnpackVector(vec[0]);
 
-  return subvec_shape;
+  for (size_t i = 1; i < vec.size(); ++i) {
+    std::tie(flattened_subvec, subvec_size, subvec_shape) = UnpackVector(vec[i]);
+    CHECK(subvec0_shape.size() == subvec_shape.size())
+    for (size_t j = 0; j < subvec_shape.size(); ++j) {
+      CHECK(subvec0_shape[j] == subvec_shape[j]);
+    }
+    flattened_subvec0.insert(flattened_subvec0.end(), flattened_subvec.begin(),
+                             flattened_subvec.end());
+    subvec0_size += subvec_size;
+  }
+  subvec0_shape.insert(subvec0_shape.begin(), vec.size());
+  return {flattened_subvec0, subvec0_size, subvec0_shape};
 }
 
 using ::tvm::runtime::NDArray;
@@ -169,15 +181,16 @@ using ::tvm::runtime::NDArray;
 template<typename T>
 inline NDArray ToNDArray(const std::vector<T>& vec, std::vector<size_t> shape = {},
                          const DataType data_type = DataType::Float(32)) {
+  std::vector<typename VectorStripper<T>::type> flattened_vec;
+  size_t vec_size;
+  std::vector<size_t> vec_shape;
+
+  std::tie(flattened_vec, vec_size, vec_shape) = UnpackVector(vec);
   if (shape.empty()) {
-    shape = UnpackVectorShape(vec);
-  }
-  size_t vec_size = 1;
-  for (const size_t s : shape) {
-    vec_size *= s;
+    shape = vec_shape;
   }
   NDArray ret = NDArray::Empty(shape, data_type, Device{kDLCPU, 0});
-  ret.CopyFromBytes(vec.data(), sizeof(int) * vec_size);
+  ret.CopyFromBytes(flattened_vec.data(), sizeof(int) * vec_size);
   return ret;
 }
 
