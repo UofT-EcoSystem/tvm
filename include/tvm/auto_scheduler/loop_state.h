@@ -445,6 +445,11 @@ class State : public ObjectRef {
    */
   TVM_DLL int rfactor(int stage_id, const Iterator& it, int factor_iter_id, const ComputeDAG& dag);
 
+  /**
+   * @brief Retrieve all the split factors.
+   */
+  Array<Array<Optional<Integer>>> GetSplitFactors() const;
+
   TVM_DEFINE_OBJECT_REF_METHODS(State, ObjectRef, StateNode);
   TVM_DEFINE_OBJECT_REF_COW_METHOD(StateNode);
 };

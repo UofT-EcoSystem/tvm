@@ -17,12 +17,12 @@ TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
         p->stream << "DietCodeDispatcher("
                     << node->search_task << ", "
                     << node->GetStates() << ", "
-                    << node->GetWklInstDispMap()
+                    << node->GetWklInstIdDispMap()
                   << ")";
       }
     );
 
-Map<Integer, Integer> DietCodeDispatcherNode::GetWklInstDispMap() const {
+Map<Integer, Integer> DietCodeDispatcherNode::GetWklInstIdDispMap() const {
   Map<Integer, Integer> wkl_inst_id_disp_map_;
   for (const auto& kv : wkl_inst_id_disp_map) {
     wkl_inst_id_disp_map_.Set(Integer(kv.first), Integer(kv.second));

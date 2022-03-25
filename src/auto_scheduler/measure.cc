@@ -59,10 +59,12 @@ static const char* ErrorNoToStr[] = {
 };
 
 /********** Measure input and result **********/
-MeasureInput::MeasureInput(SearchTask task, State state) {
+MeasureInput::MeasureInput(SearchTask task, State state,
+                           Optional<Array<IntImm>> wkl_inst) {
   auto node = make_object<MeasureInputNode>();
   node->task = std::move(task);
   node->state = std::move(state);
+  node->wkl_inst = std::move(wkl_inst);
   data_ = std::move(node);
 }
 
@@ -194,6 +196,7 @@ PythonBasedMeasureCallback::PythonBasedMeasureCallback(PackedFunc callback_func)
 }
 
 void PythonBasedMeasureCallbackNode::Callback(const SearchPolicy& policy,
+                                              const ProgramMeasurer& measurer,
                                               const Array<MeasureInput>& inputs,
                                               const Array<MeasureResult>& results) {
   if (auto* sketch_policy = static_cast<SketchPolicyNode*>(policy.operator->())) {
@@ -222,9 +225,12 @@ ProgramMeasurer::ProgramMeasurer(ProgramBuilder builder, ProgramRunner runner,
 
 void ProgramMeasurerNode::Reset() {
   ct = error_ct = 0;
-  best_flops.clear();
+  best_score.clear();
+  best_states.clear();
+  best_state_flops.clear();
+  best_wkl_inst_flops.clear();
+  best_wkl_inst_disp_map.clear();
   best_ct.clear();
-  best_state.clear();
   has_valid.clear();
 }
 
@@ -236,6 +242,17 @@ Array<MeasureResult> ProgramMeasurerNode::Measure(const SearchTask& task,
 
   Array<MeasureResult> results;
   results.reserve(inputs.size());
+
+  // <bojian/DietCode>
+  // make a copy of the current best states and their corresponding flops
+  std::vector<State> candidate_states;
+  std::vector<float> candidate_flops;
+
+  if (IsDynTask(task)) {
+    // copy the best states and flops out as candidates
+    candidate_states = std::move(best_states[task->workload_key]);
+    candidate_flops  = std::move(best_state_flops[task->workload_key]);
+  }
 
   if (batch_size == -1) {
     // set default batch size
@@ -257,36 +274,62 @@ Array<MeasureResult> ProgramMeasurerNode::Measure(const SearchTask& task,
     // update current best state according to the new measure result
     for (size_t j = 0; j < input_batch.size(); ++j) {
       const String& workload_key = input_batch[j]->task->workload_key;
-      double flops;
+
+      Array<IntImm> cherry_picked_wkl_inst;
+      double flop_ct, flops;
+      float adaption_penalty;
+      Array<Array<Optional<Integer>>> split_factors = input_batch[j]->state.GetSplitFactors();
 
       if (result_batch[j]->error_no == 0) {
-        flops = task->compute_dag->flop_ct / FloatArrayMean(result_batch[j]->costs);
+        if (IsDynTask(task)) {
+          std::tie(cherry_picked_wkl_inst, flop_ct, adaption_penalty) =
+              task->compute_dag.CherryPickWklInst(input_batch[j]->state, task);
+        } else {
+          flop_ct = task->compute_dag->flop_ct;
+          adaption_penalty = 1.;
+        }
+        // make sure that the value for FLOPS is well defined
+        CHECK(flop_ct != -1);
+        flops = flop_ct / adaption_penalty / FloatArrayMean(result_batch[j]->costs);
+        LOG(INFO) << "Successfully completed the measurement on state w/ "
+                     "split factors=" << split_factors << ", "
+                     "costs=" << result_batch[j]->costs << "->"
+                     "avg_cost=" << FloatArrayMean(result_batch[j]->costs) << ", "
+                     "flop_ct=" << flop_ct << " => "
+                     "flops=" << flop_ct / FloatArrayMean(result_batch[j]->costs) << "->" << flops;
         error_ct = 0;
         has_valid.insert(workload_key);
       } else {
         flops = 0.0;
         error_ct++;
       }
-
-      if (flops > best_flops[workload_key]) {
-        best_flops[workload_key] = flops;
-        best_state[workload_key] = input_batch[j]->state;
-        best_ct[workload_key] = ct;
-      }
-
+      if (IsDynTask(task)) {
+        // record the measured throughputs
+        candidate_states.push_back(input_batch[j]->state);
+        candidate_flops .push_back(flops);
+      } else {
+        if (flops > best_score[workload_key]) {
+          best_score[workload_key] = flops;
+          best_states[workload_key] = {input_batch[j]->state};
+          best_ct[workload_key] = ct;
+        }
+      }  // if (IsDynTask(task))
       ct++;
       StdCout(verbose, 2) << std::fixed << std::setprecision(2) << Chars('=', 50) << "\n"
                           << "No: " << ct << "\tGFLOPS: " << flops / 1e9 << " / "
-                          << best_flops[workload_key] / 1e9 << "\tresults: " << result_batch[j]
+                          << best_score[workload_key] / 1e9
+                          << "\tresults: " << result_batch[j]
                           << "\n"
                           << Chars('=', 50) << "\n"
                           << input_batch[j]->state << "\n";
-    }
+    }  // for (j ∈ range(input_batch.size()))
 
     // Call callback functions
-    if (callbacks) {
+    if (callbacks && !IsDynTask(policy->search_task)) {
       for (const auto& callback : callbacks.value()) {
-        callback->Callback(policy, input_batch, result_batch);
+        callback->Callback(policy,
+                           GetRef<ProgramMeasurer>(this),
+                           input_batch, result_batch);
       }
     }
 
@@ -303,6 +346,79 @@ Array<MeasureResult> ProgramMeasurerNode::Measure(const SearchTask& task,
       verbose = old_verbosity;
     }
   }
+
+  if (IsDynTask(task)) {
+    // calculate the adapted score of each candidate state
+    float occupancy_penalty, padding_penalty;
+    // [num_insts x num_states]
+    std::vector<float> adapted_candidate_flops(
+        task->wkl_insts.size() * candidate_states.size());
+
+    for (size_t state_id = 0; state_id < candidate_states.size(); ++state_id) {
+      for (size_t wkl_inst_id = 0; wkl_inst_id < task->wkl_insts.size(); ++wkl_inst_id) {
+        AdaptStateToWorkload(task, candidate_states[state_id],
+                             task->wkl_insts[wkl_inst_id],
+                             candidate_flops[state_id],
+                             &occupancy_penalty, &padding_penalty,
+                             &adapted_candidate_flops[
+                               wkl_inst_id * candidate_states.size() + state_id]
+                             );
+      }
+    }  // for (state_id ∈ candidate_states.size())
+
+    // Top-K Dispatch
+    TopKDispatcher dispatcher;
+    // enable_verbose_logging = true;
+    std::unordered_map<size_t, size_t> raw_wkl_inst_id_disp_map =
+        dispatcher.Dispatch(adapted_candidate_flops, candidate_states.size());
+
+    std::unordered_map<size_t, size_t> wkl_inst_id_disp_map;
+    std::vector<State> selected_candidate_states;
+    std::vector<float> selected_candidate_flops;
+    std::vector<float> wkl_inst_predicted_flops;
+
+    std::tie(wkl_inst_id_disp_map,
+             selected_candidate_states,
+             selected_candidate_flops,
+             wkl_inst_predicted_flops) =
+        dispatcher.MapWklInstsToStates(raw_wkl_inst_id_disp_map,
+                                       candidate_states,
+                                       candidate_flops,
+                                       task->wkl_insts,
+                                       adapted_candidate_flops);
+
+    std::vector<std::string> selected_candidate_str_repr;
+    std::ostringstream strout;
+    strout.str("");
+    strout.clear();
+    for (const State& state : selected_candidate_states) {
+      strout << "  " << state.GetSplitFactors()
+             << std::endl;
+      selected_candidate_str_repr.push_back(strout.str());
+      strout.str("");
+      strout.clear();
+    }
+    Map<Array<IntImm>, Integer> wkl_inst_disp_map;
+    for (const std::pair<size_t, size_t>& inst_state_pair : wkl_inst_id_disp_map) {
+      wkl_inst_disp_map.Set(task->wkl_insts[inst_state_pair.first],
+                            Integer(inst_state_pair.second));
+    }
+    // make a copy of the previous predicted FLOPS per instance
+    std::vector<float> prev_inst_flops = std::move(best_wkl_inst_flops[task->workload_key]);
+    LOG(INFO) << "best_states=" << selected_candidate_str_repr << "\n"
+              << "best_state_flops=" << selected_candidate_flops << "\n"
+              << "best_wkl_inst_disp_map=" << wkl_inst_id_disp_map
+              << "best_inst_flops=" << wkl_inst_predicted_flops;
+    best_states[task->workload_key] = std::move(selected_candidate_states);
+    best_state_flops[task->workload_key] = std::move(selected_candidate_flops);
+    best_wkl_inst_id_disp_map[task->workload_key] = std::move(wkl_inst_id_disp_map);
+    best_wkl_inst_flops[task->workload_key] = std::move(wkl_inst_predicted_flops);
+    if (callbacks) {
+      for (const auto& callback : callbacks.value()) {
+        callback->Callback(policy, GetRef<ProgramMeasurer>(this), {}, {});
+      }
+    }
+  }  // IsDynTask(task)
 
   PrintTimeElapsed(t_begin, "measurement", verbose);
 

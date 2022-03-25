@@ -445,6 +445,21 @@ String State::ToStr(bool delete_trivial_loop) const {
   return os.str();
 }
 
+Array<Array<Optional<Integer>>> State::GetSplitFactors() const {
+  Array<Array<Optional<Integer>>> split_factors;
+
+  for (const Step& step : (*this)->transform_steps) {
+    if (const SplitStepNode* const split_step = step.as<SplitStepNode>()) {
+      if (operator->()->stages[step->stage_id]->op->name.find(".shared") !=
+            std::string::npos) {
+        continue;
+      }
+      split_factors.push_back(split_step->lengths);
+    }
+  }
+  return split_factors;
+}
+
 TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
     .set_dispatch<StageNode>([](const ObjectRef& ref, ReprPrinter* p) {
       const auto& stage = tvm::Downcast<Stage>(ref);

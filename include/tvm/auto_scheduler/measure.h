@@ -477,7 +477,7 @@ class ProgramMeasurerNode : public Object {
   std::unordered_map<std::string, double> best_score;
   std::unordered_map<std::string, std::vector<State>> best_states;
   std::unordered_map<std::string, std::unordered_map<size_t, size_t>>
-      best_wkl_inst_disp_map;
+      best_wkl_inst_id_disp_map;
   std::unordered_map<std::string, std::vector<float>> best_state_flops;
   std::unordered_map<std::string, std::vector<float>> best_wkl_inst_flops;
   /**

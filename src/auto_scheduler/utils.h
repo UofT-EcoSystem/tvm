@@ -128,6 +128,37 @@ inline int64_t ElementProduct(const std::vector<int>& array) {
 }
 
 template<typename T>
+inline std::ostream& operator<<(std::ostream& out, const std::vector<T>& vec) {
+  out << "[";
+  for (const T& i : vec) {
+    out << i << ", ";
+  }
+  out << "]";
+  return out;
+}
+
+template<typename T>
+inline std::ostream& operator<<(std::ostream& out, const std::vector<std::vector<T>>& mat) {
+  out << "[";
+  out << std::endl;
+  for (const auto& vec : mat) {
+    out << "  " << vec << std::endl;
+  }
+  out << "]";
+  return out;
+}
+
+template<typename K, typename V, typename H, typename E>
+inline std::ostream& operator<<(std::ostream& out, const std::unordered_map<K, V, H, E>& map) {
+  out << "{" << std::endl;
+  for (const auto& kv : Map) {
+    out << "  " << kv.first << " : " << kv.second << std::endl;
+  }
+  out << "}";
+  return out;
+}
+
+template<typename T>
 inline Array<PrimExpr> ToPrimExprArray(const Array<T>& a) {
   Array<PrimExpr> exprs;
   for (const T& t : a) {
@@ -506,6 +537,51 @@ class FlopEstimator : public ExprFunctor<double(const PrimExpr& n)> {
   bool fail_{false};
   int cur_type_code_;
 };
+
+struct TopKDispatcher {
+ private:
+  size_t max_num_states_;
+ public:
+  TopKDispatcher(const size_t max_num_states = 128)
+      : max_num_states_(max_num_states) {}
+  /**
+   * 
+   */
+  std::unordered_map<size_t, size_t>
+  Dispatch(const std::vector<float>& scores, const size_t num_states);
+  /**
+   * @brief   Map workload instances to states.
+   * @param   raw_wkl_inst_id_disp_maps
+   * @param   candidate_states
+   * @param   candidate_flops
+   * @param   wkl_insts
+   * @param   adapted_candidate_flops
+   * @return  A tuple, 1st is the generated index mapping from workload
+   *          instances to states, 2nd is the selected states, 3rd is the
+   *          compute throughputs of those states, 4th is the 
+   */
+  std::tuple<std::unordered_map<size_t, size_t>,
+             std::vector<State>,
+             std::vector<float>,
+             std::vector<float>>
+  MapWklInstsToStates(const std::unordered_map<size_t, size_t>& raw_wkl_inst_id_disp_map,
+                      const std::vector<State>& candidate_states,
+                      const std::vector<float>& candidate_flops,
+                      const Array<Array<IntImm>>& wkl_insts,
+                      const std::vector<float>& adapted_candidate_flops);
+};
+
+void AdaptStateToWorkload(const SearchTask& task, const State& state,
+                          const Array<IntImm>& shape_values,
+                          const float score, float* const occupancy_penalty,
+                          float* const padding_penalty,
+                          float* const adapted_score
+                          );
+
+double EstimateFlopForInst(const ComputeDAG& compute_dag,
+                           // const Array<Step>& transform_steps,
+                           const Array<DynShapeVar>& shape_vars,
+                           const Array<IntImm>& shape_values);
 
 }  // namespace auto_scheduler
 }  // namespace tvm
