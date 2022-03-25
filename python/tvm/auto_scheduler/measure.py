@@ -36,6 +36,7 @@ import time
 import shutil
 import tempfile
 import multiprocessing
+import numpy as np
 import logging
 
 import tvm._ffi
@@ -98,7 +99,7 @@ class PythonBasedMeasureCallback(MeasureCallback):
 
         self.__init_handle_by_constructor__(_ffi_api.PythonBasedMeasureCallback, callback_func)
 
-    def callback(self, policy, inputs, results):
+    def callback(self, policy, measurer, inputs, results):
         """The callback function.
 
         Parameters
@@ -231,6 +232,9 @@ def recover_measure_input(inp, rebuild_state=False):
         workload_key=task.workload_key,
         target=task.target,
         hardware_params=task.hardware_params,
+        shape_vars=task.shape_vars,
+        wkl_insts=task.wkl_insts,
+        wkl_inst_weights=task.wkl_inst_weights,
         layout_rewrite_option=task.layout_rewrite_option,
         task_inputs=list(task.task_input_names),
     )
@@ -613,13 +617,25 @@ def _local_build_worker(inp_serialized, build_func, verbose):
     args = []
 
     try:
-        sch, args = task.compute_dag.apply_steps_from_state(
-            inp.state, layout_rewrite=task.layout_rewrite_option
-        )
+        if task.shape_vars is not None:
+            # dynamic search task
+            if inp.wkl_inst is not None:
+                print("Measuring on wkl_inst={}".format(inp.wkl_inst))
+                sch, args = task.compute_dag.get_sched_args_pair_on_wkl_inst(
+                                inp.state, task.shape_vars, inp.wkl_inst
+                            )
+            else:
+                sch, args = task.compute_dag.cherry_pick_wkl_inst(inp.state, task)
+        else:
+            sch, args = task.compute_dag.apply_steps_from_state(
+                    inp.state, layout_rewrite=task.layout_rewrite_option
+                    )
     # pylint: disable=broad-except
     except Exception:
         error_no = MeasureErrorNo.INSTANTIATION_ERROR
         error_msg = make_traceback_info()
+        print("Exception caught with error message={}".format(error_msg))
+
 
     if error_no == 0:
         dirname = tempfile.mkdtemp()

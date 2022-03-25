@@ -252,3 +252,14 @@ def get_per_store_feature_names(max_n_bufs: Optional[int] = None) -> List[str]:
         The names of elements in the flatten feature vector
     """
     return _ffi_api.GetPerStoreFeatureNames(max_n_bufs or DEFAULT_MAX_N_BUFS)
+
+
+def adapt_states_to_workloads(task: "SearchTask", 
+                              states: List[Union[State, StateObject]],
+                              scores: List[float]
+                              ):
+    if isinstance(states[0], State):
+        state_objects = [s.state_object for s in states]
+    elif isinstance(states[0], StateObject):
+        state_objects = states
+    return [arr.asnumpy() for arr in _ffi_api.AdaptStatesToWorkloads(task, state_objects, scores)]

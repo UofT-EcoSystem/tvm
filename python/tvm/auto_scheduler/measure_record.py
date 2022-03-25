@@ -32,8 +32,6 @@ from . import _ffi_api
 
 logger = logging.getLogger("auto_scheduler")
 
-use_ansor_log_format = int(os.getenv('USE_ANSOR_LOG_FORMAT', '0'))
-
 
 @tvm._ffi.register_object("auto_scheduler.RecordToFile")
 class RecordToFile(MeasureCallback):
@@ -121,19 +119,27 @@ class RecordReader(Object):
         If you want to use them, you can call the :code:`recover_measure_input` below
         to rebuild these fields.
         """
-        inputs, results = _ffi_api.RecordReaderReadLines(
-            self, max_lines if max_lines else -1, skip_lines
-        )
+        inputs, results, dispatchers = \
+                _ffi_api.RecordReaderReadLines(
+                    self, max_lines if max_lines else -1, skip_lines
+                )
         self.check_workload_key(inputs)
-        return inputs, results
+        return inputs, results, dispatchers
 
     def __iter__(self):
         while True:
             ret = _ffi_api.RecordReaderReadNext(self)
             if not ret:
                 break
+
             self.check_workload_key([ret[0]])
-            yield ret[0], ret[1]  # (input, result)
+
+            from .dietcode import DietCodeDispatcher
+
+            if isinstance(ret, DietCodeDispatcher):
+                yield ret
+            else:
+                yield (ret[0], ret[1])  # (input, result)
 
 
 def load_record_from_string(record):
@@ -193,7 +199,8 @@ def load_records(filename):
     If you want to use them, you can call the :code:`recover_measure_input` below
     to rebuild these fields.
     """
-    return zip(*RecordReader(filename).read_lines())
+    inputs, results, dispatchers = RecordReader(filename).read_lines()
+    return zip(inputs, results), dispatchers
 
 
 def save_records(filename, inputs, results):

@@ -84,6 +84,12 @@ def random_fill_float(size, return_ptr):
     array_wrapper[:] = np.random.uniform(0, 1, (size,))
 
 
+def _wrap_ptr_as_np_array(ptr, shape):
+    ret_ptr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_float))
+    np_arr_wrapper = np.ctypeslib.as_array(ret_ptr, shape=shape)
+    return np_arr_wrapper
+
+
 @tvm._ffi.register_object("auto_scheduler.PythonBasedModel")
 class PythonBasedModel(CostModel):
     """Base class for cost models implemented in python"""
@@ -97,6 +103,49 @@ class PythonBasedModel(CostModel):
             array_wrapper = np.ctypeslib.as_array(return_ptr, shape=(len(states),))
             array_wrapper[:] = self.predict(task, states)
 
+        def predict_for_all_instances_func(task, states, occupancy_penalty_ptr,
+                                           padding_penalty_ptr, scores_ptr):
+            scores_shape = (len(task.wkl_insts), len(states))
+            print("Shape output from cost model={}".format(scores_shape))
+            occupancy_penalty_np_arr = \
+                    _wrap_ptr_as_np_array(occupancy_penalty_ptr, scores_shape)
+            padding_penalty_np_arr = \
+                    _wrap_ptr_as_np_array(padding_penalty_ptr, scores_shape)
+            scores_np_arr = _wrap_ptr_as_np_array(scores_ptr, scores_shape)
+            occupancy_penalty_np_arr[:], padding_penalty_np_arr[:], \
+                    scores_np_arr[:] = self.predict_for_all_instances(task, states)
+
+        def score_func(task, num_states, scores_ptr, weights_ptr,
+                       inst_disp_map, ret_score_ptr):
+            """
+            Parameters
+            ----------
+            task           : Search Task
+            num_states     : Number of States
+            scores_ptr     : A matrix of scores, each represents the compute
+                             throughput of each micro-kernel (i.e., state) on
+                             each workload iknstance.
+            weights_ptr    : The weight of each workload instance.
+            ret_scores_ptr : Weighted Score to Return (scalar)
+            """
+            scores_np = _wrap_ptr_as_np_array(
+                    scores_ptr, (len(task.wkl_insts), num_states))
+            freq_np = np.array(list(task.wkl_inst_weights), dtype=np.float32)
+            weights_np = _wrap_ptr_as_np_array(
+                    weights_ptr, (len(task.wkl_insts)))
+            weights_np = freq_np * weights_np
+            print("weights={}".format(weights_np))
+            ret_score_np =  _wrap_ptr_as_np_array(ret_score_ptr, (1,))
+
+            scores_by_inst = []
+            for inst_id in range(len(task.wkl_insts)):
+                scores_by_inst.append(scores_np[inst_id, inst_disp_map[inst_id]])
+            scores_by_inst = np.array(scores_by_inst, dtype=np.float32)
+            print("scores_by_inst={}".format(scores_by_inst))
+
+            ret_score_np[:] = np.sum(scores_by_inst * weights_np, keepdims=True)
+
+
         def predict_stage_func(task, states, return_ptr):
             ret = self.predict_stages(task, states)
             return_ptr = ctypes.cast(return_ptr, ctypes.POINTER(ctypes.c_float))
@@ -104,7 +153,10 @@ class PythonBasedModel(CostModel):
             array_wrapper[:] = ret
 
         self.__init_handle_by_constructor__(
-            _ffi_api.PythonBasedModel, update_func, predict_func, predict_stage_func
+            _ffi_api.PythonBasedModel, update_func, predict_func, 
+            predict_for_all_instances_func,
+            score_func,
+            predict_stage_func
         )
 
     def update(self, inputs, results):
@@ -135,6 +187,10 @@ class PythonBasedModel(CostModel):
             The predicted scores for all states
         """
         raise NotImplementedError
+
+    def predict_for_all_instances(self, task, states):
+        raise NotImplementedError
+
 
     def predict_stages(self, task, states):
         """Predict the scores of all stages in states. This is the breakdown version of `predict`.

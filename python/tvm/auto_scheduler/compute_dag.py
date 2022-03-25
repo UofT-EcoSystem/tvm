@@ -133,6 +133,14 @@ class ComputeDAG(Object):
         """
         return State(self.init_state, self)
 
+    def cherry_pick_wkl_inst(self, state, task):
+        state_obj = state if isinstance(state, StateObject) else state.state_object
+        return _ffi_api.CherryPickWklInst(self, state_obj, task)
+
+    def get_sched_args_pair_on_wkl_inst(self, state, shape_vars, wkl_inst):
+        state_obj = state if isinstance(state, StateObject) else state.state_object
+        return _ffi_api.GetSchedArgsPairOnWklInst(self, state_obj, shape_vars, wkl_inst)
+
     def apply_steps_from_state(self, state, layout_rewrite=LayoutRewriteOption.NO_REWRITE):
         """
         Apply the history transform steps from a State to get a TVM schedule.
@@ -236,7 +244,13 @@ class ComputeDAG(Object):
         io_shapes = []
         for tensor in self.tensors:
             io_shapes += get_const_tuple(tensor.shape)
-        return json.dumps([hash_key] + io_shapes)
+
+        # <bojian/DietCode>
+        import os
+        if int(os.getenv('USE_ANSOR_SCHED_LOG_FORMAT', '0')):
+            return json.dumps([hash_key] + io_shapes)
+        else:
+            return SaveJSON([hash_key] + io_shapes)
 
     def __str__(self):
         # pretty print

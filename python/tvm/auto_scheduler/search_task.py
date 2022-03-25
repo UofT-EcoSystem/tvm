@@ -386,12 +386,6 @@ class SearchTask(Object):
         The target host device of this search task.
     hardware_params : Optional[HardwareParams]
         Hardware parameters used in this search task.
-    shape_vars : List[tvm.tir.DynShapeVar]
-        Dynamic Shape Variables
-    wkl_insts : List[List[int]]
-        List of Workload Instances
-    wkl_inst_weights : List[float]
-        Weights Associated with Each Workload Instance
     layout_rewrite_option : Optional[LayoutRewriteOption]
         The layout rewrite option used for measuring programs. If None, the default value will be
         set depending on the specified target.
@@ -507,7 +501,7 @@ class SearchTask(Object):
             cost_model = XGBModel()
             search_policy = SketchPolicy(self, cost_model)
 
-        _ffi_api.AutoSchedule(search_policy, tuning_options)
+        return _ffi_api.AutoSchedule(search_policy, tuning_options)
 
     def apply_best(self, log_file, include_compatible=False, layout_rewrite_option=None):
         """Apply the history best from a log file and return the schedule.
@@ -588,7 +582,7 @@ class SearchTask(Object):
     def __setstate__(self, state):
         # Register the workload if needed
         try:
-            workload = json.loads(state["workload_key"])
+            workload = tvm.ir.load_json(state["workload_key"])
         except Exception:  # pylint: disable=broad-except
             raise RuntimeError("Invalid workload key %s" % state["workload_key"])
 

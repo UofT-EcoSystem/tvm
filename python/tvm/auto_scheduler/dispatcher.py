@@ -205,11 +205,13 @@ class ApplyHistoryBest(DispatchContext):
         if not records:
             return
 
+        inp_res_pairs, dispatchers = records
         best_by_targetkey = self.best_by_targetkey
         best_by_model = self.best_by_model
 
         counter = 0
-        for inp, res in records:
+
+        for inp, res in inp_res_pairs:
             if n_lines is not None and counter >= n_lines:
                 break
             counter += 1
@@ -224,24 +226,43 @@ class ApplyHistoryBest(DispatchContext):
                 entry, _, workload_args = self.get_workload_entry(
                     best_by_targetkey, k, inp.task.workload_key
                 )
-                if workload_args not in entry:
-                    entry[workload_args] = (inp.state, cost)
+                if 'cached_autosched_result' not in entry:
+                    entry['cached_autosched_result'] = (inp.state, cost)
                 else:
-                    _, other_cost = entry[workload_args]
+                    _, other_cost = entry['cached_autosched_result']
                     if other_cost > cost:
-                        entry[workload_args] = (inp.state, cost)
+                        entry['cached_autosched_result'] = (inp.state, cost)
 
             # use model as key to build best map
             entry, _, workload_args = self.get_workload_entry(
                 best_by_model, inp.task.target.model, inp.task.workload_key
             )
-            if workload_args not in entry:
+            if 'cached_autosched_result' not in entry:
                 if inp.task.target.model != "unknown":
-                    entry[workload_args] = (inp.state, cost)
+                    entry['cached_autosched_result'] = (inp.state, cost)
             else:
-                _, other_cost = entry[workload_args]
+                _, other_cost = entry
                 if other_cost > cost:
-                    entry[workload_args] = (inp.state, cost)
+                    entry['cached_autosched_result'] = (inp.state, cost)
+
+        print("Loading dynamic workload dispatchers")
+        for disp in dispatchers:
+            if n_lines is not None and counter >= n_lines:
+                break
+            counter += 1
+
+            entry, workload_hash, workload_args = \
+                    self.get_workload_entry(
+                        best_by_model, disp.search_task.target.model,
+                        disp.search_task.workload_key
+                    )
+            entry['cached_autosched_result'] = disp
+            for k in disp.search_task.target.keys:
+                entry, workload_hash, workload_args = \
+                        self.get_workload_entry(
+                            best_by_targetkey, k, disp.search_task.workload_key
+                        )
+                entry['cached_autosched_result'] = disp
 
         logger.debug("Finish loading %d records", counter)
 
@@ -262,9 +283,11 @@ class ApplyHistoryBest(DispatchContext):
             entry, workload_hash, workload_args = self.get_workload_entry(
                 best_records, target_key, workload_key
             )
-            if workload_args in entry:
-                ret = entry[workload_args][0]
+            if 'cached_autosched_result' in entry:
+                ret = entry['cached_autosched_result']
             elif self.include_compatible:
+                assert False, "include_compatible has not been handled"
+
                 best_cost = float("inf")
                 for args, val in entry.items():
                     dis_f = calc_workload_dis_factor(
@@ -297,9 +320,28 @@ class ApplyHistoryBest(DispatchContext):
             if ret is not None:
                 return ret
 
+        from .relay_integration import DYN_SEARCH_TASK_REGISTRY, remove_func_name_indices
+        func_name = remove_func_name_indices(func_name)
+
+        if func_name in DYN_SEARCH_TASK_REGISTRY:
+            print("Loading dynamic func_name={}".format(func_name))
+
+            search_task = DYN_SEARCH_TASK_REGISTRY[func_name]
+            ret = match_record(self.best_by_model, target.model,
+                               search_task.workload_key)
+            if ret is not None:
+                return ret
+            for k in target.keys:
+                ret = match_record(self.best_by_targetkey, k,
+                                   search_task.workload_key)
+                if ret is not None:
+                    return ret
         return None
 
     def update(self, target, workload_key, state):
+
+        assert False, "include_compatible has not been handled"
+
         entry, _, workload_args = self.get_workload_entry(
             self._best_user_defined, target.model, workload_key
         )

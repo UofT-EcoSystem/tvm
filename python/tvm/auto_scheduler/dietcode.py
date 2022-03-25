@@ -36,3 +36,20 @@ class DietCodeDispatcher(Object):
             if wkl_inst == shape_tuple:
                 return i
         assert False, "{} not found".format(shape_tuple)
+
+
+def replace_shape_vars(wkl_func_args, shape_vars, new_shape_vars):
+    replaced_dyn_args = \
+            _ffi_api.ReplaceShapeVars(wkl_func_args, shape_vars, new_shape_vars)
+    return tuple(replaced_dyn_args)
+
+def instantiate_dyn_args(wkl_func_args, shape_vars, wkl_inst):
+    instantiated_dyn_args = \
+            _ffi_api.InstantiateDynArgs(wkl_func_args, shape_vars, wkl_inst)
+    return tuple([i.value for i in instantiated_dyn_args])
+
+def serialize_state(state):
+    return _ffi_api.SerializeState(state)
+
+def deserialize_state(json_str):
+    return _ffi_api.DeserializeState(json_str)

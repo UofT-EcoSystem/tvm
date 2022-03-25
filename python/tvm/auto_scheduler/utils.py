@@ -33,7 +33,7 @@ except ImportError:
     psutil = None
 
 import tvm
-from tvm import rpc
+from tvm import rpc, tir
 from tvm.tir import expr
 from tvm.tir.transform import Simplify
 from tvm.ir.transform import Sequential
@@ -68,7 +68,10 @@ def decode_workload_key(workload_key):
         return ret
 
     try:
-        key_list = json.loads(workload_key)
+        if int(os.getenv('USE_ANSOR_SCHED_LOG_FORMAT', '0')):
+            key_list = json.loads(workload_key)
+        else:
+            key_list = tvm.ir.load_json(workload_key)
         if isinstance(key_list, list) and len(key_list) >= 1:
             return key_list[0], tuple(flatten_list(key_list[1:]))
     except json.decoder.JSONDecodeError:
@@ -249,10 +252,6 @@ MAX_TRACEBACK_INFO_LEN = 512
 def make_traceback_info():
     """Get the error message from traceback."""
     info = str(traceback.format_exc())
-    if len(info) > MAX_TRACEBACK_INFO_LEN:
-        info = (
-            info[: MAX_TRACEBACK_INFO_LEN // 2] + "\n...\n" + info[-MAX_TRACEBACK_INFO_LEN // 2 :]
-        )
     return info
 
 

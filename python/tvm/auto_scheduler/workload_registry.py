@@ -158,9 +158,6 @@ def make_workload_key(func, args):
 
     args = serialize_args(args)
 
-    # <DietCode>
-    #
-    # Switch to TVM builtin JSON methods (for support of DynShapeVar's).
     return tvm.ir.save_json((func_name,) + args)
 
 

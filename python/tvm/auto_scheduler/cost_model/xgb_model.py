@@ -25,7 +25,10 @@ import numpy as np
 
 from tvm.autotvm.tuner.metric import max_curve
 from .cost_model import PythonBasedModel
-from ..feature import get_per_store_features_from_measure_pairs, get_per_store_features_from_states
+from ..feature import get_per_store_features_from_measure_pairs, \
+                      get_per_store_features_from_states, \
+                      get_per_store_features_from_dietcode_measure_pairs, \
+                      adapt_states_to_workloads
 from ..measure_record import RecordReader
 
 xgb = None
@@ -235,7 +238,7 @@ class XGBModel(PythonBasedModel):
             raw_preds = self.bst.predict(dtest)
             ret = predict_throughput_pack_sum(raw_preds, pack_ids)
         else:
-            ret = np.random.uniform(0, 1, (len(states),))
+            ret = np.ones(shape=(len(states),))
 
         # Predict -inf for invalid states that failed to be lowered.
         for idx, feature in enumerate(features):
@@ -243,6 +246,23 @@ class XGBModel(PythonBasedModel):
                 ret[idx] = float("-inf")
 
         return ret
+
+    def predict_for_all_instances(self, task, states):
+        # copied from the above prediction function
+        features = get_per_store_features_from_states(states, task)
+        if self.bst is not None and len(self.inputs) > self.num_warmup_sample:
+            dtest, pack_ids = feature_to_pack_sum_xgbmatrix(features)
+            raw_preds = self.bst.predict(dtest)
+            ret = predict_throughput_pack_sum(raw_preds, pack_ids)
+        else:
+            ret = np.ones(shape=(len(states),))
+
+        # Predict -inf for invalid states that failed to be lowered.
+        for idx, feature in enumerate(features):
+            if feature.min() == feature.max() == 0:
+                ret[idx] = float("-inf")
+
+        return adapt_states_to_workloads(task, states, ret.tolist())
 
     def predict_stages(self, task, states):
         """Predict the scores of all stages in states. This is the breakdown version of `predict`.
@@ -318,7 +338,11 @@ class XGBModel(PythonBasedModel):
         n_lines: Optional[int]
             Only load first n lines of the log file
         """
-        inputs, results = RecordReader(file_name).read_lines(n_lines)
+        inputs, results, dispatchers = \
+                RecordReader(file_name).read_lines(n_lines)
+        if len(dispatchers) != 0:
+            assert False, "Loading for dynamic workloads is not yet supported"
+
         logger.info("XGBModel: Loaded %s measurement records from %s", len(inputs), file_name)
         self.update(inputs, results)
 

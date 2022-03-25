@@ -1509,6 +1509,28 @@ TVM_REGISTER_GLOBAL("auto_scheduler.ComputeDAG")
       return ComputeDAG(tensors.value());
     });
 
+
+TVM_REGISTER_GLOBAL("auto_scheduler.CherryPickWklInstAndApplySteps")
+    .set_body_typed(
+      [](const ComputeDAG& dag, const State& state, const SearchTask& task)
+        -> Array<ObjectRef> {
+        te::Schedule synthetic_sch;
+        Array<te::Tensor> synthetic_tensors;
+        std::tie(synthetic_sch, synthetic_tensors) =
+            dag.CherryPickWklInstAndApplySteps(state, task);
+        return Array<ObjectRef>{synthetic_sch, synthetic_tensors};
+      }
+    );
+
+TVM_REGISTER_GLOBAL("auto_scheduler.GetSchedArgsPairOnWklInst")
+    .set_body_typed([](const ComputeDAG& dag, const State& state,
+                       const Array<Var>& shape_vars,
+                       const Array<IntImm>& wkl_inst) {
+      std::pair<te::Schedule, Array<te::Tensor>> sched_and_args =
+          dag.InstantiateAndApplySteps(state, shape_vars, ToPrimExprArray(wkl_inst));
+      return Array<ObjectRef>{sched_and_args.first, sched_and_args.second};
+    });
+
 TVM_REGISTER_GLOBAL("auto_scheduler.ComputeDAGApplyStepsFromState")
     .set_body_typed([](const ComputeDAG& dag, const State& state, int layout_rewrite) {
       te::Schedule sch;
