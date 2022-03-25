@@ -23,11 +23,12 @@
  */
 
 #include <dmlc/json.h>
+#include <tvm/auto_scheduler/auto_schedule.h>
 #include <tvm/auto_scheduler/loop_state.h>
 #include <tvm/auto_scheduler/measure_record.h>
 #include <tvm/auto_scheduler/transform_step.h>
-#include <tvm/node/serialization.h>
 #include <tvm/runtime/registry.h>
+#include <tvm/node/serialization.h>
 
 #include <fstream>
 #include <sstream>
@@ -35,15 +36,9 @@
 #include <utility>
 #include <vector>
 
+#include "../tir/ir/dyn_shape_var.h"
 #include "utils.h"
-
-using ::tvm::runtime::Array;
-using ::tvm::runtime::Downcast;
-using ::tvm::FloatImm;
-using ::tvm::IntImm;
-using ::tvm::LoadJSON;
-using ::tvm::SaveJSON;
-using ::tvm::tir::Var;
+#include "search_policy/utils.h"
 
 // Json serialization handler for MeasureInput, MeasureResult
 // (and recursively for SearchTask, State, Step, ...)
@@ -164,6 +159,18 @@ struct Handler<::tvm::auto_scheduler::HardwareParamsNode> {
   }
 };
 
+using ::tvm::runtime::Array;
+using ::tvm::runtime::Map;
+using ::tvm::runtime::String;
+using ::tvm::runtime::Downcast;
+using ::tvm::SaveJSON;
+using ::tvm::LoadJSON;
+using ::tvm::ObjectRef;
+using ::tvm::Optional;
+using ::tvm::IntImm;
+using ::tvm::FloatImm;
+using ::tvm::tir::Var;
+
 template <>
 struct Handler<::tvm::auto_scheduler::SearchTaskNode> {
   inline static void Write(dmlc::JSONWriter* writer,
@@ -180,17 +187,6 @@ struct Handler<::tvm::auto_scheduler::SearchTaskNode> {
     } else {
       writer->WriteArrayItem(std::string(""));
     }
-
-    if (data.shape_vars) {
-      writer->WriteArrayItem(SaveJSON(data.shape_vars.value()));
-      writer->WriteArrayItem(SaveJSON(data.wkl_insts));
-      writer->WriteArrayItem(SaveJSON(data.wkl_inst_weights));
-    } else {
-      writer->WriteArrayItem(std::string(""));
-      writer->WriteArrayItem(std::string(""));
-      writer->WriteArrayItem(std::string(""));
-    }
-
     writer->WriteArrayItem(static_cast<int>(data.layout_rewrite_option));
     writer->WriteArraySeperator();
     writer->BeginArray(false);
@@ -198,6 +194,12 @@ struct Handler<::tvm::auto_scheduler::SearchTaskNode> {
       writer->WriteArrayItem(std::string(i));
     }
     writer->EndArray();
+    if (data.shape_vars) {
+      writer->WriteArrayItem(SaveJSON(data.shape_vars.value()));
+      writer->WriteArrayItem(SaveJSON(data.wkl_insts));
+      writer->WriteArrayItem(SaveJSON(data.wkl_inst_weights));
+    }
+
     writer->EndArray();
   }
   inline static void Read(dmlc::JSONReader* reader, ::tvm::auto_scheduler::SearchTaskNode* data) {
@@ -227,32 +229,6 @@ struct Handler<::tvm::auto_scheduler::SearchTaskNode> {
         }
         s = reader->NextArrayItem();
         ICHECK(s);
-
-        reader->Read(&str_value);
-        if (!str_value.empty()) {
-          data->shape_vars = Downcast<Array<Var>>(LoadJSON(str_value));
-        }
-        s = reader->NextArrayItem();
-        ICHECK(s);
-        reader->Read(&str_value);
-        if (data->shape_vars) {
-          CHECK(!str_value.empty())
-              << "shape_vars=" << data->shape_vars << " but unable to obtain "
-                 "workload instances";
-          data->wkl_insts = Downcast<Array<Array<IntImm>>>(LoadJSON(str_value));
-        }
-        s = reader->NextArrayItem();
-        ICHECK(s);
-        reader->Read(&str_value);
-        if (data->shape_vars) {
-          CHECK(!str_value.empty())
-              << "shape_vars=" << data->shape_vars << " but unable to obtain "
-                 "workload instance weights";
-          data->wkl_inst_weights = Downcast<Array<FloatImm>>(LoadJSON(str_value));
-        }
-        s = reader->NextArrayItem();
-        ICHECK(s);
-
         reader->Read(&int_value);
         data->layout_rewrite_option = ::tvm::auto_scheduler::LayoutRewriteOption(int_value);
         s = reader->NextArrayItem();
@@ -266,8 +242,24 @@ struct Handler<::tvm::auto_scheduler::SearchTaskNode> {
           }
           // Process the end of array
           s = reader->NextArrayItem();
+
+          if (s) {
+            reader->Read(&str_value);
+            data->shape_vars = Downcast<Array<Var>>(LoadJSON(str_value));
+            ICHECK(s);
+            s = reader->NextArrayItem();
+            reader->Read(&str_value);
+            ObjectRef obj_ref = LoadJSON(str_value);
+            data->wkl_insts = Downcast<Array<Array<IntImm>>>(obj_ref);
+            ICHECK(s);
+            s = reader->NextArrayItem();
+            reader->Read(&str_value);
+            data->wkl_inst_weights = 
+                Downcast<Array<FloatImm>>(LoadJSON(str_value));
+            s = reader->NextArrayItem();
+          }
+          ICHECK(!s);
         }
-        ICHECK(!s);
       }
     }
   }
@@ -280,6 +272,9 @@ struct Handler<::tvm::auto_scheduler::MeasureInputNode> {
     writer->BeginArray(false);
     writer->WriteArrayItem(*data.task.operator->());
     writer->WriteArrayItem(*data.state.operator->());
+    if (data.wkl_inst) {
+      writer->WriteArrayItem(SaveJSON(data.wkl_inst.value()));
+    }
     writer->EndArray();
   }
   inline static void Read(dmlc::JSONReader* reader, ::tvm::auto_scheduler::MeasureInputNode* data) {
@@ -296,10 +291,16 @@ struct Handler<::tvm::auto_scheduler::MeasureInputNode> {
     ICHECK(s);
     reader->Read(state_node.get());
     s = reader->NextArrayItem();
-    ICHECK(!s);
 
     data->task = ::tvm::auto_scheduler::SearchTask(task_node);
     data->state = ::tvm::auto_scheduler::State(state_node);
+    if (s) {
+      std::string str_value;
+      reader->Read(&str_value);
+      data->wkl_inst = Downcast<Array<IntImm>>(LoadJSON(str_value));
+      s = reader->NextArrayItem();
+    }
+    ICHECK(!s);
   }
 };
 
@@ -347,6 +348,65 @@ struct Handler<::tvm::auto_scheduler::MeasureResultNode> {
   }
 };
 
+
+template <>
+struct Handler<std::vector<::tvm::auto_scheduler::State>> {
+  inline static void Write(dmlc::JSONWriter* writer,
+                           const std::vector<::tvm::auto_scheduler::State>& data) {
+    writer->BeginArray(false);
+    for (const auto& state : data) {
+      writer->WriteArrayItem(*(state.operator->()));
+    }
+    writer->EndArray();
+  }
+  inline static void Read(dmlc::JSONReader* reader,
+                          std::vector<::tvm::auto_scheduler::State>* data) {
+    data->clear();
+
+    bool s;
+    reader->BeginArray();
+    s = reader->NextArrayItem();
+    while (s) {
+      auto state_node = ::tvm::make_object<::tvm::auto_scheduler::StateNode>();
+      state_node->concrete = true;
+      reader->Read(state_node.get());
+      data->push_back(::tvm::auto_scheduler::State(state_node));
+      s = reader->NextArrayItem();
+    }
+  }
+};
+
+template<>
+struct Handler<std::unordered_map<size_t, size_t>> {
+  inline static void Write(dmlc::JSONWriter* writer,
+                           const std::unordered_map<size_t, size_t>& data) {
+    writer->BeginArray(false);
+    for (const std::pair<size_t, size_t>& kv : data) {
+      writer->WriteArraySeperator();
+      writer->BeginArray(false);
+      writer->WriteArrayItem(kv.first);
+      writer->WriteArrayItem(kv.second);
+      writer->EndArray();
+    }
+    writer->EndArray();
+  }
+  inline static void Read(dmlc::JSONReader* reader,
+                          std::unordered_map<size_t, size_t>* data) {
+    data->clear();
+
+    bool s;
+    reader->BeginArray();
+    s = reader->NextArrayItem();
+    std::pair<size_t, size_t> kv;
+    while (s) {
+      reader->Read(&kv);
+      s = reader->NextArrayItem();
+      data->insert(kv);
+    }
+  }
+};
+
+
 }  // namespace json
 }  // namespace dmlc
 
@@ -375,30 +435,89 @@ void WriteMeasureRecords(std::ostream* os, const Array<MeasureInput>& inputs,
   }
 }
 
-void ReadMeasureRecord(const std::string& str, MeasureInputNode* inp, MeasureResultNode* res,
-                       std::string* log_version) {
+namespace {
+
+void WriteMeasureRecords(std::ostream* os,
+                         const SearchPolicy& policy,
+                         const ProgramMeasurer& measurer,
+                         const std::string& log_version = AUTO_SCHEDULER_LOG_VERSION) {
+  dmlc::JSONWriter writer(os);
+  
+  writer.BeginObject(false);
+  writer.WriteObjectKeyValue("t", *(policy->search_task.operator->()));
+  writer.WriteObjectKeyValue("s", measurer->best_states[policy->search_task->workload_key]);
+  writer.WriteObjectKeyValue("d", measurer->best_wkl_inst_id_disp_map[policy->search_task->workload_key]);
+  writer.WriteObjectKeyValue("v", log_version);
+  writer.EndObject();
+  *os << "\n";
+}
+
+}  // namespace anonymous
+
+enum class ReadNextResultKind { kStatic, kDynamic, kInvalid };
+
+ObjectRef ReadMeasureRecord(const std::string& str) {
   std::istringstream ss(str);
   dmlc::JSONReader reader(&ss);
   std::string key;
 
+  auto inp = make_object<MeasureInputNode>();
+  auto res = make_object<MeasureResultNode>();
+  std::string log_version;
+
+  auto search_task = make_object<SearchTaskNode>();
+  std::vector<State> best_states;
+  std::unordered_map<size_t, size_t> best_wkl_inst_id_disp_map;
+
+  ReadNextResultKind is_dyn_task = ReadNextResultKind::kInvalid;
+
   reader.BeginObject();
   while (reader.NextObjectItem(&key)) {
     if (key == "i") {
-      reader.Read(inp);
+      is_dyn_task = ReadNextResultKind::kStatic;
+      reader.Read(inp.operator->());
     } else if (key == "r") {
-      reader.Read(res);
+      is_dyn_task = ReadNextResultKind::kStatic;
+      reader.Read(res.operator->());
     } else if (key == "v") {
-      reader.Read(log_version);
+      reader.Read(&log_version);
+    } else if (key == "t") {
+      is_dyn_task = ReadNextResultKind::kDynamic;
+      reader.Read(search_task.operator->());
+    } else if (key == "s") {
+      is_dyn_task = ReadNextResultKind::kDynamic;
+      reader.Read(&best_states);
+    } else if (key == "d") {
+      is_dyn_task = ReadNextResultKind::kDynamic;
+      reader.Read(&best_wkl_inst_id_disp_map);
     } else {
       LOG(FATAL) << "Invalid key in json log: " << key;
     }
   }
+
+  if (is_dyn_task == ReadNextResultKind::kDynamic) {
+    return DietCodeDispatcher(SearchTask(search_task),
+                              std::move(best_states),
+                              std::move(best_wkl_inst_id_disp_map));
+  } else if (is_dyn_task == ReadNextResultKind::kStatic) {
+    return Array<ObjectRef>{MeasureInput(inp), MeasureResult(res)};
+  } else {
+    return ObjectRef(nullptr);
+  }
+
 }
 
-void RecordToFileNode::Callback(const SearchPolicy& policy, const Array<MeasureInput>& inputs,
+void RecordToFileNode::Callback(const SearchPolicy& policy,
+                                const ProgramMeasurer& measurer,
+                                const Array<MeasureInput>& inputs,
                                 const Array<MeasureResult>& results) {
   std::ofstream ofs(filename, std::ofstream::app);
-  WriteMeasureRecords(&ofs, inputs, results);
+
+  if (IsDynTask(policy->search_task)) {
+    WriteMeasureRecords(&ofs, policy, measurer);
+  } else {
+    WriteMeasureRecords(&ofs, inputs, results);
+  }
 }
 
 RecordReader::RecordReader(String filename) {
@@ -410,7 +529,7 @@ RecordReader::RecordReader(String filename) {
 
 RecordReaderNode::~RecordReaderNode() { infile.close(); }
 
-bool RecordReaderNode::ReadNext(MeasureInputNode* inp, MeasureResultNode* res) {
+ObjectRef RecordReaderNode::ReadNext() {
   std::string log_version;
 
   while (std::getline(infile, cur_line_)) {
@@ -418,35 +537,39 @@ bool RecordReaderNode::ReadNext(MeasureInputNode* inp, MeasureResultNode* res) {
       // skip comment lines begin with '#' or ' '
       continue;
     }
-    ReadMeasureRecord(cur_line_, inp, res, &log_version);
-    return true;
+    return ReadMeasureRecord(cur_line_);
   }
-
-  return false;
+  return ObjectRef(nullptr);
 }
 
-std::pair<Array<MeasureInput>, Array<MeasureResult>> RecordReaderNode::ReadLines(int max_size,
-                                                                                 int skip_size) {
-  auto inp = make_object<MeasureInputNode>();
-  auto res = make_object<MeasureResultNode>();
+std::tuple<Array<MeasureInput>, Array<MeasureResult>, Array<DietCodeDispatcher>>
+RecordReaderNode::ReadLines(int max_size, int skip_size) {
   Array<MeasureInput> inputs;
   Array<MeasureResult> results;
+  Array<DietCodeDispatcher> dispatchers;
+  ObjectRef obj_ref = ReadNext();
 
-  while (ReadNext(inp.get(), res.get())) {
+  while (obj_ref.defined()) {
     if (skip_size > 0) {
       skip_size--;
       continue;
     }
 
-    inputs.push_back(inp->copy());
-    results.push_back(res->copy());
+    if (obj_ref->IsInstance<DietCodeDispatcherNode>()) {
+      dispatchers.push_back(Downcast<DietCodeDispatcher>(obj_ref));
+    } else {
+      Array<ObjectRef> inp_res_pair = Downcast<Array<ObjectRef>>(obj_ref);
+      inputs.push_back(Downcast<MeasureInput>(inp_res_pair[0]));
+      results.push_back(Downcast<MeasureResult>(inp_res_pair[1]));
+    }
 
     if (max_size > 0 && static_cast<int>(inputs.size()) >= max_size) {
       break;
     }
-  }
+    obj_ref = ReadNext();
+  }  // while (obj_ref.defined())
 
-  return std::make_pair(inputs, results);
+  return std::make_tuple(inputs, results, dispatchers);
 }
 
 TVM_REGISTER_GLOBAL("auto_scheduler.RecordToFile").set_body_typed([](const String& filename) {
@@ -460,25 +583,16 @@ TVM_REGISTER_GLOBAL("auto_scheduler.RecordReader").set_body_typed([](const Strin
 TVM_REGISTER_GLOBAL("auto_scheduler.RecordReaderReadLines")
     .set_body_typed([](RecordReader reader, int size, int skip_size) {
       const auto& res = reader->ReadLines(size, skip_size);
-      return Array<ObjectRef>{res.first, res.second};
+      return Array<ObjectRef>{std::get<0>(res), std::get<1>(res), 
+                              std::get<2>(res)};
     });
 
 TVM_REGISTER_GLOBAL("auto_scheduler.RecordReaderReadNext").set_body_typed([](RecordReader reader) {
-  auto inp = make_object<MeasureInputNode>();
-  auto res = make_object<MeasureResultNode>();
-  if (reader->ReadNext(inp.get(), res.get())) {
-    return Array<ObjectRef>{ObjectRef(inp), ObjectRef(res)};
-  } else {
-    return Array<ObjectRef>();
-  }
+  return reader->ReadNext();
 });
 
 TVM_REGISTER_GLOBAL("auto_scheduler.ReadMeasureRecord").set_body_typed([](const std::string& str) {
-  auto inp = make_object<MeasureInputNode>();
-  auto res = make_object<MeasureResultNode>();
-  std::string log_version;
-  ReadMeasureRecord(str, inp.get(), res.get(), &log_version);
-  return Array<ObjectRef>{ObjectRef(inp), ObjectRef(res)};
+  return ReadMeasureRecord(str);
 });
 
 TVM_REGISTER_GLOBAL("auto_scheduler.WriteMeasureRecords")
@@ -527,6 +641,23 @@ TVM_REGISTER_GLOBAL("auto_scheduler.DeserializeSearchTask").set_body_typed([](St
   reader.Read(search_task.get());
   return ObjectRef(search_task);
 });
+
+TVM_REGISTER_GLOBAL("auto_scheduler.SerializeState")
+    .set_body_typed([](const State& state) {
+      std::ostringstream os;
+      dmlc::JSONWriter writer(&os);
+      writer.Write(*state.get());
+      return os.str();
+    });
+
+TVM_REGISTER_GLOBAL("auto_scheduler.DeserializeState")
+    .set_body_typed([](const String& json_str) {
+      std::istringstream strin(json_str);
+      dmlc::JSONReader reader(&strin);
+      auto state = make_object<StateNode>();
+      reader.Read(state.get());
+      return State(state);
+    });
 
 }  // namespace auto_scheduler
 }  // namespace tvm

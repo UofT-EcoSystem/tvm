@@ -310,14 +310,26 @@ inline int64_t GetExtent(const Iterator& it) {
   return -1;
 }
 
+inline int64_t GetExtent(const Iterator& it, const Array<Var>& shape_vars,
+                         const Array<Array<IntImm>>& wkl_insts) {
+  if (it->range.defined()) {
+    if (auto pint = it->range->extent.as<IntImmNode>()) {
+      return pint->value;
+    }
+  }
+  return GetIntImm(EvaluateRangeForAllWklInsts(it->range->extent, shape_vars, wkl_insts).max());
+}
+
 /*! \brief Compute the product of lengths of all space iters and all reduce iters, respectively. */
-inline std::pair<int64_t, int64_t> GetCumulativeSpaceAndReductionLength(const Stage& stage) {
+inline std::pair<int64_t, int64_t> GetCumulativeSpaceAndReductionLength(
+    const Stage& stage, const Array<Var>& shape_vars,
+    const Array<Array<IntImm>>& wkl_insts) {
   int64_t cum_space_len = 1, cum_reduce_len = 1;
   for (const auto& iter : stage->iters) {
     if (iter->iter_kind == IteratorKind::kSpatial) {
-      cum_space_len *= GetExtent(iter);
+      cum_space_len *= GetExtent(iter, shape_vars, wkl_insts);
     } else if (iter->iter_kind == IteratorKind::kReduction) {
-      cum_reduce_len *= GetExtent(iter);
+      cum_reduce_len *= GetExtent(iter, shape_vars, wkl_insts);
     }
   }
   return std::make_pair(cum_space_len, cum_reduce_len);
@@ -330,7 +342,8 @@ inline bool NeedsRfactor(const SearchTask& task, const State& state, int stage_i
     // Compute the product of lengths of all space iters and all reduce iters
     int cum_space_len, cum_reduce_len;
     std::tie(cum_space_len, cum_reduce_len) =
-        GetCumulativeSpaceAndReductionLength(state->stages[stage_id]);
+        GetCumulativeSpaceAndReductionLength(state->stages[stage_id], task->shape_vars.value(),
+                                             task->wkl_insts);
 
     if (NeedsMultilevelTiling(task, state, stage_id)) {
       // Do not use rfactor if we have enough parallelism on space iters

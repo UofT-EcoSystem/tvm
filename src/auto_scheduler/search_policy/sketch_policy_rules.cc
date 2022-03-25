@@ -346,7 +346,9 @@ SketchGenerationRule::ConditionKind RuleCrossThreadReduction::MeetCondition(
     // Compute the product of lengths of all space iters and all reduce iters
     int cum_space_len, cum_reduce_len;
     std::tie(cum_space_len, cum_reduce_len) =
-        GetCumulativeSpaceAndReductionLength(state->stages[stage_id]);
+        GetCumulativeSpaceAndReductionLength(state->stages[stage_id],
+                                             policy.search_task->shape_vars.value(),
+                                             policy.search_task->wkl_insts);
 
     if (NeedsMultilevelTiling(policy.search_task, state, stage_id)) {
       // Avoid rfactor if we have enough parallelism on space iters
@@ -1267,7 +1269,7 @@ MutateDietCodeTileSizes::Apply(SketchPolicyNode* policy, State* state,
   // pick a workload instance to optimize for
   Array<IntImm> wkl_inst =
       policy->search_task->wkl_insts[
-        RandomChoose(policy->curr_inst_opt_prob, rand_gen)
+        RandomChoose(policy->curr_wkl_inst_opt_prob, rand_gen)
       ];
 
   std::vector<SplitStepInfo> split_steps_info =

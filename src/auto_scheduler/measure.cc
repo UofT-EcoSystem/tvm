@@ -229,7 +229,7 @@ void ProgramMeasurerNode::Reset() {
   best_states.clear();
   best_state_flops.clear();
   best_wkl_inst_flops.clear();
-  best_wkl_inst_disp_map.clear();
+  best_wkl_inst_id_disp_map.clear();
   best_ct.clear();
   has_valid.clear();
 }
@@ -368,7 +368,6 @@ Array<MeasureResult> ProgramMeasurerNode::Measure(const SearchTask& task,
 
     // Top-K Dispatch
     TopKDispatcher dispatcher;
-    // enable_verbose_logging = true;
     std::unordered_map<size_t, size_t> raw_wkl_inst_id_disp_map =
         dispatcher.Dispatch(adapted_candidate_flops, candidate_states.size());
 

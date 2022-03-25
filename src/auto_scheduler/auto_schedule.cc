@@ -55,8 +55,8 @@ ObjectRef AutoSchedule(SearchPolicy search_policy, TuningOptions tuning_options)
                       tuning_options->measure_callbacks, tuning_options->verbose);
 
   std::vector<State> states;
-  std::unordered_map<size_t, size_t> inst_disp_map;
-  std::tie(states, inst_disp_map) =
+  std::unordered_map<size_t, size_t> wkl_inst_id_disp_map;
+  std::tie(states, wkl_inst_id_disp_map) =
       search_policy->Search(tuning_options->num_measure_trials,
                             tuning_options->early_stopping,
                             tuning_options->num_measures_per_round,
@@ -64,7 +64,7 @@ ObjectRef AutoSchedule(SearchPolicy search_policy, TuningOptions tuning_options)
   // return a workload dispatcher in the case when the search task is dynamic
   if (IsDynTask(search_policy->search_task)) {
     return DietCodeDispatcher(search_policy->search_task, std::move(states),
-                              std::move(inst_disp_map));
+                              std::move(wkl_inst_id_disp_map));
   } else {
     State state = Downcast<State>(states[0]);
     if (state.defined()) {

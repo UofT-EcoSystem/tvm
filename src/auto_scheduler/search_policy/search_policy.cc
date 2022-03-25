@@ -22,6 +22,7 @@
  * \brief The base class of search policies.
  */
 
+#include <tvm/auto_scheduler/dietcode.h>
 #include <tvm/auto_scheduler/measure_record.h>
 #include <tvm/auto_scheduler/search_policy.h>
 #include <tvm/runtime/registry.h>
@@ -38,13 +39,13 @@ TVM_REGISTER_OBJECT_TYPE(PreloadMeasuredStatesNode);
 void SearchPolicyNode::PreloadMeasuredStates(const String& log_file) {
   RecordReader reader = RecordReader(log_file);
   const auto& res = reader->ReadLines(-1);
-  size_t log_size = res.first.size();
-  ICHECK_EQ(log_size, res.second.size());
+  size_t log_size =  std::get<0>(res).size();
+  ICHECK_EQ(log_size, std::get<1>(res).size());
   if (log_size) {
     Array<State> measured_states;
     std::vector<float> measured_throughputs;
     for (size_t i = 0; i < log_size; i++) {
-      const auto& inp = res.first[i];
+      const auto& inp = std::get<0>(res)[i];
       if (inp->task->workload_key == search_task->workload_key &&
           inp->task->target->kind->name.compare(search_task->target->kind->name) == 0) {
         State state = search_task->compute_dag->init_state;
@@ -55,7 +56,7 @@ void SearchPolicyNode::PreloadMeasuredStates(const String& log_file) {
         }
         measured_states.push_back(std::move(state));
         measured_throughputs.push_back(
-            res.second[i]->error_no == 0 ? (1.0 / FloatArrayMean(res.second[i]->costs)) : 0.0);
+            std::get<1>(res)[i]->error_no == 0 ? (1.0 / FloatArrayMean(std::get<1>(res)[i]->costs)) : 0.0);
       }
     }
     // We can assume the recorded states will all be valid after infer bound
@@ -106,10 +107,14 @@ TVM_REGISTER_GLOBAL("auto_scheduler.SearchPolicyRunCallbacks")
 
 TVM_REGISTER_GLOBAL("auto_scheduler.SearchPolicyContinueSearchOneRound")
     .set_body_typed([](SearchPolicy policy, int num_measure, ProgramMeasurer measurer) {
-      Array<MeasureInput> inputs;
-      Array<MeasureResult> results;
-      std::tie(inputs, results) = policy->ContinueSearchOneRound(num_measure, measurer);
-      return Array<ObjectRef>{inputs, results};
+      size_t num_measure_inputs;
+      float best_measure_avg_latency;
+      std::tie(num_measure_inputs, best_measure_avg_latency) =
+          policy->ContinueSearchOneRound(num_measure, measurer);
+      return Array<ObjectRef>{
+               Integer(num_measure_inputs),
+               FloatImm(DataType::Float(32), best_measure_avg_latency)
+             };
     });
 
 TVM_REGISTER_GLOBAL("auto_scheduler.SearchPolicySetVerbose")

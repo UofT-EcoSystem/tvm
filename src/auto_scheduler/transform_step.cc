@@ -30,6 +30,9 @@
 #include <tvm/runtime/registry.h>
 #include <tvm/te/operation.h>
 
+// <bojian/DietCode>
+#include <tvm/node/serialization.h>
+
 #include <string>
 #include <utility>
 #include <vector>
@@ -978,9 +981,7 @@ SplitStep::SplitStep(int stage_id, int iter_id, Optional<PrimExpr> extent,
   auto node = make_object<SplitStepNode>();
   node->stage_id = stage_id;
   // Extent can be a irreducible expression in some special cases
-  if (extent && extent.value()->IsInstance<IntImmNode>()) {
-    node->extent = tvm::Downcast<Integer>(extent.value());
-  }
+  node->extent = extent;
   node->iter_id = iter_id;
   node->lengths = lengths;
   node->inner_to_outer = inner_to_outer;
@@ -996,13 +997,22 @@ SplitStep::SplitStep(dmlc::JSONReader* reader) {
   s = reader->NextArrayItem();
   ICHECK(s);
   reader->Read(&node->iter_id);
-  int int_val;
+
   s = reader->NextArrayItem();
   ICHECK(s);
-  reader->Read(&int_val);
-  if (int_val) {
-    node->extent = Integer(int_val);
+
+  ObjectRef extent;
+  if (dmlc::GetEnv("USE_ANSOR_SCHED_LOG_FORMAT", 0)) {
+    int int_val;
+    reader->Read(&int_val);
+    extent = Integer(int_val);
+  } else {
+    std::string extent_json_str;
+    reader->Read(&extent_json_str);
+    extent = LoadJSON(extent_json_str);
   }
+  node->extent = Downcast<PrimExpr>(extent);
+
   s = reader->NextArrayItem();
   ICHECK(s);
   reader->Read(&node->lengths);
@@ -1017,7 +1027,15 @@ void SplitStepNode::WriteToRecord(dmlc::JSONWriter* writer) const {
   writer->WriteString(record_prefix_str);
   writer->WriteArrayItem(stage_id);
   writer->WriteArrayItem(iter_id);
-  writer->WriteArrayItem(extent ? GetIntImm(extent.value()) : 0);
+
+  std::string extent_json_str;
+  if (extent) {
+    extent_json_str = SaveJSON(extent);
+  } else {
+    extent_json_str = SaveJSON(Integer(0));
+  }
+  writer->WriteArrayItem(extent_json_str);
+
   writer->WriteArrayItem(lengths);
   writer->WriteArrayItem(static_cast<int>(inner_to_outer));
 }

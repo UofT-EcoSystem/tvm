@@ -35,6 +35,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+// #include <tvm/target/tag.h>
+
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -43,6 +45,7 @@
 
 #include "search_policy/utils.h"
 #include "utils.h"
+#include "../tir/ir/dyn_shape_var.h"
 
 namespace tvm {
 // import the function from driver_api.cc
@@ -1277,9 +1280,15 @@ void GetPerStoreFeaturesWorkerFunc(const SearchTask& task, const State& state, i
   te::Schedule sch;
   Array<te::Tensor> tensors;
 
-  std::tie(sch, tensors) = task->compute_dag.ApplySteps(state->transform_steps);
+  if (IsDynTask(task)) {
+    std::tie(sch, tensors) =
+        task->compute_dag.CherryPickWklInstAndApplySteps(state, task);
+  } else {
+    std::tie(sch, tensors) =
+        task->compute_dag.ApplySteps(state->transform_steps);
+  }
   sch = sch.normalize_for_feature_extraction();
-  auto bounds = te::InferBound(sch);
+  Map<IterVar, Range> bounds = te::InferBound(sch);
 
   try {
     auto stmt = te::ScheduleOps(sch, bounds, false);
@@ -1337,7 +1346,7 @@ void GetPerStoreFeaturesWorkerFunc(const SearchTask& task, const State& state, i
     ICHECK(it != mod->functions.end());
     const auto& prim_func = (*it).second.as<PrimFuncNode>();
     GetPerStoreFeature(prim_func->body, task->hardware_params->cache_line_bytes, max_n_bufs,
-                       feature);
+                       feature, IsDynTask(task));
   } catch (Error& e) {
     (*error_ct)++;
   }
@@ -1394,9 +1403,13 @@ void GetPerStoreFeaturesFromFile(const std::string& filename, int max_lines, int
 
   // read from file
   RecordReader reader(filename);
-  auto cur_inp = make_object<MeasureInputNode>();
-  auto cur_res = make_object<MeasureResultNode>();
-  while (reader->ReadNext(cur_inp.get(), cur_res.get())) {
+  ObjectRef obj_ref = reader->ReadNext();
+
+  while (obj_ref.defined() &&obj_ref->IsInstance<ArrayNode>()) {
+    Array<ObjectRef> inp_res_pair = Downcast<Array<ObjectRef>>(obj_ref);
+    MeasureInput cur_inp = Downcast<MeasureInput>(inp_res_pair[0]);
+    MeasureResult cur_res = Downcast<MeasureResult>(inp_res_pair[1]);
+
     float cost = static_cast<float>(FloatArrayMean(cur_res->costs));
     const std::string& workload_key = cur_inp->task->workload_key;
 
@@ -1407,13 +1420,9 @@ void GetPerStoreFeaturesFromFile(const std::string& filename, int max_lines, int
     if (find_res == task_cache.end()) {
       // rebuild task
       Array<te::Tensor> tensors = (*workload_key_to_tensors)(workload_key);
-      Target target = cur_inp->task->target;
-      Target target_host = cur_inp->task->target_host;
-      CheckAndUpdateHostConsistency(&target, &target_host);
-      task = SearchTask(ComputeDAG(tensors), workload_key, target, target_host,
-                        cur_inp->task->hardware_params,
-                        cur_inp->task->shape_vars,
-                        cur_inp->task->wkl_insts,
+      task = SearchTask(ComputeDAG(tensors), workload_key, cur_inp->task->target,
+                        cur_inp->task->target_host, cur_inp->task->hardware_params,
+                        cur_inp->task->shape_vars, cur_inp->task->wkl_insts,
                         cur_inp->task->wkl_inst_weights,
                         cur_inp->task->layout_rewrite_option,
                         cur_inp->task->task_input_names);
@@ -1487,10 +1496,9 @@ void GetPerStoreFeaturesFromMeasurePairs(const Array<MeasureInput>& inputs,
           Target target_host = inputs[i]->task->target_host;
           CheckAndUpdateHostConsistency(&target, &target_host);
           task =
-              SearchTask(ComputeDAG(tensors), workload_key, target, target_host,
-                         inputs[i]->task->hardware_params,
-                         inputs[i]->task->shape_vars,
-                         inputs[i]->task->wkl_insts,
+              SearchTask(ComputeDAG(tensors), workload_key, inputs[i]->task->target,
+                         inputs[i]->task->target_host, inputs[i]->task->hardware_params,
+                         inputs[i]->task->shape_vars, inputs[i]->task->wkl_insts,
                          inputs[i]->task->wkl_inst_weights,
                          inputs[i]->task->layout_rewrite_option,
                          inputs[i]->task->task_input_names);
@@ -1516,8 +1524,22 @@ void GetPerStoreFeaturesFromMeasurePairs(const Array<MeasureInput>& inputs,
     normalized_throughputs->push_back(cost);
   }
 
+  CHECK(inputs.size() == normalized_throughputs->size());
+  Array<IntImm> cherry_picked_wkl_inst;
+  double flop_ct;
+  float adaption_penalty;
   for (size_t i = 0; i < normalized_throughputs->size(); ++i) {
-    (*normalized_throughputs)[i] = min_costs[(*task_ids)[i]] / (*normalized_throughputs)[i];
+    if (IsDynTask(inputs[i]->task)) {
+      std::tie(cherry_picked_wkl_inst, flop_ct, adaption_penalty) =
+          inputs[i]->task->compute_dag.CherryPickWklInst(
+            inputs[i]->state, inputs[i]->task
+          );
+      (*normalized_throughputs)[i] =
+          flop_ct / adaption_penalty / (*normalized_throughputs)[i] / 1e12;
+    } else {
+      (*normalized_throughputs)[i] =
+          min_costs[(*task_ids)[i]] / (*normalized_throughputs)[i];
+    }  // if (IsDynTask(inputs[i]->task))
   }
 
   GetPerStoreFeaturesFromStates(states, tasks, skip_first_n_feature_extraction, max_n_bufs,
@@ -1671,6 +1693,115 @@ TVM_REGISTER_GLOBAL("auto_scheduler.GetPerStoreFeatureNames")
       }
       *ret = arr;
     });
+
+void AdaptStateToWorkload(const SearchTask& task, const State& state,
+                          const Array<IntImm>& wkl_inst,
+                          const float score, float* const occupancy_penalty,
+                          float* const padding_penalty,
+                          float* const adapted_score) {
+  Map<String, IntImm> shape_var_value_map;
+  Array<Var> shape_vars = task->shape_vars.value();
+
+  CHECK(shape_vars.size() == wkl_inst.size());
+  for (size_t i = 0; i < shape_vars.size(); ++i) {
+    shape_var_value_map.Set(shape_vars[i]->name_hint, wkl_inst[i]);
+  }
+  DynShapeVarReplacer replacer(
+        [&shape_var_value_map](const VarNode* op) -> PrimExpr {
+          auto shape_var_value_map_iter =
+              shape_var_value_map.find(op->name_hint);
+          if (shape_var_value_map_iter != shape_var_value_map.end()) {
+            return (*shape_var_value_map_iter).second;
+          }
+          LOG(FATAL) << "Dynamic Axis Node " << GetRef<Var>(op)
+                     << " has not been found in "
+                     << shape_var_value_map;
+          return GetRef<Var>(op);
+        }
+      );
+  arith::Analyzer analyzer;
+
+  size_t grid_size = 1;
+  *padding_penalty = 1.;
+  for (const Step& step : state->transform_steps) {
+    if (const SplitStepNode* const split_step = step.as<SplitStepNode>()) {
+      if (split_step->lengths.size() == 4) {
+        int64_t extent =
+            GetIntImm(analyzer.Simplify(replacer(split_step->extent.value())));
+        int64_t split_length = 1;
+
+        for (const Optional<Integer>& len : split_step->lengths) {
+          split_length *= len.value()->value;
+        }
+        // 1. Compute the padding ratio and accumulate in the padding penalty.
+        float padding_ratio =
+            extent * 1. / floor_by(extent, split_length);
+        *padding_penalty *= padding_ratio;
+        // 2. Compute the grid dimension.
+        size_t extent_ratio = floor_div(extent, split_length);
+        CHECK(extent_ratio >= 1);
+        grid_size *= extent_ratio;
+      }  // if (split_step->lengths.size() == 4)
+    }    // if (split_step = step.as<SplitStepNode>())
+  }      // for (step ∈ state->transform_steps)
+
+  if (task->target->tag == "nvidia/nvidia-t4") {
+    float coeff =
+        grid_size < static_cast<size_t>(task->hardware_params->num_cores) ?
+        1.433 : 2.14;
+    *occupancy_penalty =
+        coeff * grid_size
+          / ((coeff - 1) * grid_size +
+             floor_by(grid_size, task->hardware_params->num_cores)
+             );
+    CHECK(!std::isinf(*occupancy_penalty));
+  } else {
+    *occupancy_penalty =
+        1. * grid_size / floor_by(grid_size, task->hardware_params->num_cores);
+  }
+  // temporarily assign the occupancy penalty to be 1.0
+  *adapted_score = score * (*occupancy_penalty) * (*padding_penalty);
+}
+
+Array<NDArray> AdaptStatesToWorkloads(
+    const SearchTask& task, const Array<State>& states,
+    const Array<FloatImm>& scores) {
+  std::vector<float> adapted_scores(
+      task->wkl_insts.size() * states.size());
+  std::vector<float> occupancy_penalty(adapted_scores.size(), 1.f);
+  std::vector<float> padding_penalty(adapted_scores.size(), 1.f);
+
+  AdaptStateToWorkload(task, states[0], task->wkl_insts[0], scores[0]->value,
+                       &occupancy_penalty[0], &padding_penalty[0],
+                       &adapted_scores[0]);
+  support::parallel_for(
+      1, task->wkl_insts.size() * states.size(),
+      [&states, &task, &scores, &occupancy_penalty,
+       &padding_penalty, &adapted_scores]
+      (const size_t i) {
+        size_t inst_id = i / states.size(), state_id = i % states.size();
+        AdaptStateToWorkload(task, states[state_id], task->wkl_insts[inst_id],
+                             scores[state_id]->value, &occupancy_penalty[i],
+                             &padding_penalty[i], &adapted_scores[i]);
+      }
+  );
+  std::vector<size_t> out_shape = {task->wkl_insts.size(), states.size()};
+  return Array<NDArray>{ToNDArray(occupancy_penalty, out_shape),
+                        ToNDArray(padding_penalty, out_shape),
+                        ToNDArray(adapted_scores, out_shape),};
+}
+
+TVM_REGISTER_GLOBAL("auto_scheduler.AdaptStatesToWorkloads")
+    .set_body_typed(
+      [](const SearchTask& task, const Array<State>& states,
+         const Array<FloatImm>& scores) -> Array<NDArray> {
+        CHECK(IsDynTask(task))
+            << "Adaption only makes sense for dynamic workloads";
+        CHECK(states.size() == scores.size())
+            << "The number of states is not equal to the number of predicted scores";
+        return AdaptStatesToWorkloads(task, states, scores);
+      }
+    );
 
 }  // namespace auto_scheduler
 }  // namespace tvm

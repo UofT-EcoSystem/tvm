@@ -41,6 +41,7 @@
 #include <utility>
 #include <vector>
 
+#include "../utils.h"
 #include "sketch_policy_rules.h"
 
 namespace tvm {
@@ -183,15 +184,36 @@ SketchPolicy::SketchPolicy(SearchTask task, CostModel program_cost_model,
   data_ = std::move(node);
 }
 
-State SketchPolicyNode::Search(int n_trials, int early_stopping, int num_measure_per_iter,
-                               ProgramMeasurer measurer) {
+
+void SketchPolicyNode::CalculateWklInstOptProb(const ProgramMeasurer& measurer) {
+  CHECK(IsDynTask(search_task));
+  std::vector<float> inst_opt_priority;
+  const auto& best_wkl_inst_flops =
+      measurer->best_wkl_inst_flops[search_task->workload_key];
+  for (size_t i = 0; i < search_task->wkl_insts.size(); ++i) {
+    double flop = EstimateFlopsForWklInst(
+        search_task->compute_dag,
+        search_task->shape_vars.value(), search_task->wkl_insts[i]);
+    CHECK(flop > 0.);
+    inst_opt_priority.push_back(
+        flop * search_task->wkl_inst_weights[i]->value / best_wkl_inst_flops[i]);
+  }
+  ComputePrefixSumProb(inst_opt_priority, &curr_wkl_inst_opt_prob);
+  LOG(INFO) << "curr_inst_opt_prob=" << curr_wkl_inst_opt_prob;
+}
+
+std::pair<std::vector<State>, std::unordered_map<size_t, size_t>>
+SketchPolicyNode::Search(int n_trials, int early_stopping, int num_measure_per_iter,
+                         ProgramMeasurer measurer) {
   num_measure_per_iter_ = num_measure_per_iter;
 
   if (n_trials <= 1) {
     // No measurement is allowed
     const Array<State>& best_states = SearchOneRound(0);
     ICHECK_GT(best_states.size(), 0);
-    return best_states[0];
+
+    return std::make_pair(std::vector<State>{best_states[0]},
+                          std::unordered_map<size_t, size_t>{});
   } else {
     int num_random =
         static_cast<int>(GetDoubleParam(params, SketchParamKey::eps_greedy) * num_measure_per_iter);
@@ -244,6 +266,11 @@ State SketchPolicyNode::Search(int n_trials, int early_stopping, int num_measure
       // Measure candidate states
       PrintTitle("Measure", verbose);
       results = measurer->Measure(search_task, GetRef<SearchPolicy>(this), inputs);
+
+      if (IsDynTask(search_task)) {
+        CalculateWklInstOptProb(measurer);
+      }
+
       ct += inputs.size();
 
       // Check if reach the early stopping condition
@@ -254,19 +281,164 @@ State SketchPolicyNode::Search(int n_trials, int early_stopping, int num_measure
         break;
       }
 
+      LOG(INFO) << "Completed " << ct << " trials";
+      this->n_trials = ct;
+
       // Update measured states throughputs. These states will join the EvolutionarySearch in later
       // search rounds.
-      for (const auto& res : results) {
-        measured_states_throughputs_.push_back(1.0 / FloatArrayMean(res->costs));
-      }
-    }
-    PrintTitle("Done", verbose);
+      if (IsDynTask(search_task)) {
+        CHECK(inputs.size() == results.size());
+        Array<IntImm> cherry_picked_wkl_inst;
+        double flop_ct;
+        float adaption_penalty;
 
-    return measurer->best_state[search_task->workload_key];
+        for (size_t input_id = 0; input_id < inputs.size(); ++input_id) {
+          std::tie(cherry_picked_wkl_inst, flop_ct, adaption_penalty) =
+              search_task->compute_dag.CherryPickWklInst(
+                inputs[input_id]->state, search_task
+              );
+          measured_states_throughputs_.push_back(
+                flop_ct / adaption_penalty
+                  / FloatArrayMean(results[input_id]->costs)
+              );
+        }  // for (input_id ∈ inputs.size())
+      } else {
+        for (const auto& res : results) {
+          measured_states_throughputs_.push_back(1.0 / FloatArrayMean(res->costs));
+        }
+      }
+    }  // while (ct < n_trials)
+
+    // finally, do a sanity check on the dispatched states
+    if (IsDynTask(search_task)) {
+      CHECK(dmlc::GetEnv("DIETCODE_PRINT_LAUNCHBOUND", 0) != 0);
+      dmlc::SetEnv("DIETCODE_CHECK_REGISTER_SPILL", 1);
+
+      // calculate the adapted score of each candidate state
+      float occupancy_penalty, padding_penalty;
+      // [num_insts x num_states]
+      std::vector<float> adapted_candidate_flops(
+          search_task->wkl_insts.size() * measured_states_throughputs_.size());
+
+      for (size_t state_id = 0; state_id < measured_states_throughputs_.size(); ++state_id) {
+        for (size_t inst_id = 0; inst_id < search_task->wkl_insts.size(); ++inst_id) {
+          AdaptStateToWorkload(search_task, measured_states_vector_[state_id],
+                               search_task->wkl_insts[inst_id],
+                               measured_states_throughputs_[state_id],
+                               &occupancy_penalty, &padding_penalty,
+                               &adapted_candidate_flops[
+                                 inst_id * measured_states_vector_.size() + state_id]
+                               );
+        }
+      }  // for (state_id ∈ candidate_states.size())
+      bool changed_adapted_candidate_flops = false;
+
+      std::vector<size_t> wkl_inst_ids, next_wkl_inst_ids;
+      for (size_t inst_id = 0; inst_id < search_task->wkl_insts.size(); ++inst_id) {
+        wkl_inst_ids.push_back(inst_id);
+      }
+      std::unordered_map<size_t, size_t> inst_id_disp_map;
+      std::vector<State> selected_candidate_states;
+      std::vector<float> selected_candidate_flops;
+      std::vector<float> inst_predicted_flops;
+      do {
+        TopKDispatcher dispatcher;
+        std::unordered_map<size_t, size_t> raw_inst_id_disp_map =
+            dispatcher.Dispatch(adapted_candidate_flops, measured_states_vector_.size());
+        // record the selected candidate states
+        std::tie(inst_id_disp_map,
+                 selected_candidate_states,
+                 selected_candidate_flops,
+                 inst_predicted_flops) =
+            dispatcher.MapWklInstsToStates(raw_inst_id_disp_map,
+                                           measured_states_vector_,
+                                           measured_states_throughputs_,
+                                           search_task->wkl_insts,
+                                           adapted_candidate_flops);
+        std::vector<MeasureInput> test_inputs;
+        for (const size_t inst_id : wkl_inst_ids) {
+          test_inputs.push_back(
+                MeasureInput(search_task,
+                             selected_candidate_states[inst_id_disp_map[inst_id]],
+                             search_task->wkl_insts[inst_id]
+                             )
+              );
+        }
+        Array<BuildResult> build_results =
+            measurer->builder->Build(test_inputs, verbose);
+        CHECK(build_results.size() == test_inputs.size());
+
+        next_wkl_inst_ids.clear();
+        for (size_t inst_i = 0; inst_i < wkl_inst_ids.size(); ++inst_i) {
+
+          const size_t inst_id = wkl_inst_ids[inst_i],
+                       state_id = inst_id_disp_map[inst_id];
+
+          if (build_results[inst_i]->error_no != 0) {
+            adapted_candidate_flops[inst_id * measured_states_vector_.size() + state_id] = 0.;
+            next_wkl_inst_ids.push_back(inst_id);
+          }
+        }
+        std::vector<std::string> selected_candidate_str_repr;
+        std::ostringstream strout;
+        strout.str("");
+        strout.clear();
+        for (const State& state : selected_candidate_states) {
+          strout << "  " << state.GetSplitFactors()
+                 << std::endl;
+          selected_candidate_str_repr.push_back(strout.str());
+          strout.str("");
+          strout.clear();
+        }
+        Map<Array<IntImm>, Integer> inst_disp_map;
+        for (const std::pair<size_t, size_t>& inst_state_pair : inst_id_disp_map) {
+          inst_disp_map.Set(search_task->wkl_insts[inst_state_pair.first],
+                            Integer(inst_state_pair.second));
+        }
+      } while (changed_adapted_candidate_flops);
+
+      dmlc::SetEnv("DIETCODE_CHECK_REGISTER_SPILL", 0);
+
+      PrintTitle("Done", verbose);
+      return std::make_pair(selected_candidate_states, inst_id_disp_map);
+    }
+
+    PrintTitle("Done", verbose);
+    return std::make_pair(
+             measurer->best_states[search_task->workload_key],
+             std::unordered_map<size_t, size_t>{}
+           );
   }
 }
 
-std::pair<Array<MeasureInput>, Array<MeasureResult>> SketchPolicyNode::ContinueSearchOneRound(
+// Auxiliary function that evaluatas the average latency.
+static double ComputeFlopWeightedLatency(
+    const SearchTask& task, const std::vector<float>& best_inst_flops) {
+  std::vector<float> inst_weights;
+  float inst_weights_sum = 0.;
+
+  inst_weights.reserve(task->wkl_insts.size());
+  for (const FloatImm& weight : task->wkl_inst_weights) {
+    inst_weights.push_back(weight->value);
+    inst_weights_sum += weight->value;
+  }
+  for (float& weight : inst_weights) {
+    weight /= inst_weights_sum;
+  }
+
+  CHECK(best_inst_flops.size() == inst_weights.size());
+  float flop_weighted_latency = 0.;
+
+  for (size_t i = 0; i < task->wkl_insts.size(); ++i) {
+    float flop = EstimateFlopsForWklInst(task->compute_dag, task->shape_vars.value(),
+                                         task->wkl_insts[i]);
+    flop_weighted_latency += inst_weights[i] * flop / best_inst_flops[i];
+  }
+  return flop_weighted_latency;
+}
+
+std::pair<int, float>
+SketchPolicyNode::ContinueSearchOneRound(
     int num_measure, ProgramMeasurer measurer) {
   num_measure_per_iter_ = num_measure;
 
@@ -291,10 +463,33 @@ std::pair<Array<MeasureInput>, Array<MeasureResult>> SketchPolicyNode::ContinueS
   PrintTitle("Measure", verbose);
   results = measurer->Measure(search_task, GetRef<SearchPolicy>(this), inputs);
 
+  if (IsDynTask(search_task)) {
+    CalculateWklInstOptProb(measurer);
+  }
+
   // Update measured states throughputs. These states will join the EvolutionarySearch in later
   // search rounds.
-  for (const auto& res : results) {
-    measured_states_throughputs_.push_back(1.0 / FloatArrayMean(res->costs));
+  if (IsDynTask(search_task)) {
+    CHECK(inputs.size() == results.size());
+    Array<IntImm> cherry_picked_wkl_inst;
+    double flop_ct;
+    float adaption_penalty;
+
+    for (size_t input_id = 0; input_id < inputs.size(); ++input_id) {
+      std::tie(cherry_picked_wkl_inst, flop_ct, adaption_penalty) =
+          search_task->compute_dag.CherryPickWklInst(
+            inputs[input_id]->state, search_task
+          );
+
+      measured_states_throughputs_.push_back(
+            flop_ct / adaption_penalty
+              / FloatArrayMean(results[input_id]->costs)
+          );
+    }  // for (input_id ∈ inputs.size())
+  } else {
+    for (const auto& res : results) {
+      measured_states_throughputs_.push_back(1.0 / FloatArrayMean(res->costs));
+    }
   }
 
   auto t_begin = std::chrono::high_resolution_clock::now();
@@ -305,7 +500,20 @@ std::pair<Array<MeasureInput>, Array<MeasureResult>> SketchPolicyNode::ContinueS
 
   PrintTimeElapsed(t_begin, "training", verbose);
 
-  return std::make_pair(std::move(inputs), std::move(results));
+  if (IsDynTask(search_task)) {
+    return std::make_pair<int, float>(
+               inputs.size(),
+               ComputeFlopWeightedLatency(
+                 search_task, measurer->best_wkl_inst_flops[search_task->workload_key]
+               )
+             );
+  } else {
+    return std::make_pair<int, float>(
+             inputs.size(),
+             search_task->compute_dag->flop_ct /
+               measurer->best_score[search_task->workload_key]
+           );
+  }
 }
 
 Array<State> SketchPolicyNode::SearchOneRound(int num_random_states, Array<State>* random_states) {
@@ -428,23 +636,41 @@ Array<State> SketchPolicyNode::SampleInitPopulation(const Array<State>& sketches
   while (static_cast<int>(out_states.size()) < sample_init_min_pop_) {
     std::vector<State> temp_states(population);
 
-    // Sample a batch of states randomly
-    support::parallel_for(0, population, [this, &temp_states, &sketches, &rand_gens](int index) {
-      // Randomly choose a sketch
-      State tmp_s = sketches[(rand_gens[index])() % sketches.size()];
-      // Apply random annotation rules one by one
+    {
+      State tmp_s = sketches[(rand_gens[0])() % sketches.size()];
       bool valid = true;
       for (const auto& rule : init_rules) {
-        if (rule->Apply(this, &tmp_s, &rand_gens[index]) ==
+        if (rule->Apply(this, &tmp_s, &rand_gens[0]) ==
             PopulationGenerationRule::ResultKind::kInvalid) {
           valid = false;
           break;
         }
       }
       if (valid) {
-        temp_states[index] = std::move(tmp_s);
+        temp_states[0] = std::move(tmp_s);
       }
-    });
+    }
+
+    // Sample a batch of states randomly
+    support::parallel_for(
+          1, population,
+          [this, &temp_states, &sketches, &rand_gens](int index) {
+            // Randomly choose a sketch
+            State tmp_s = sketches[(rand_gens[index])() % sketches.size()];
+            // Apply random annotation rules one by one
+            bool valid = true;
+            for (const auto& rule : init_rules) {
+              if (rule->Apply(this, &tmp_s, &rand_gens[index]) ==
+                  PopulationGenerationRule::ResultKind::kInvalid) {
+                valid = false;
+                break;
+              }
+            }
+            if (valid) {
+              temp_states[index] = std::move(tmp_s);
+            }
+          }
+        );
 
     // Filter out the states that were failed to apply initial rules
     Array<State> cand_states;
@@ -461,7 +687,8 @@ Array<State> SketchPolicyNode::SampleInitPopulation(const Array<State>& sketches
       // Run the cost model to make filter out states that failed to extract features.
       // This may happen due to illegal schedules or the schedules that uses too much
       // memory on GPU.
-      std::vector<float> pop_scores;
+      std::vector<float> pop_scores, occupancy_penalty, padding_penalty;
+
       pop_scores.reserve(cand_states.size());
       cand_states = search_task->compute_dag.InferBound(cand_states);
       PruneInvalidState(search_task, &cand_states);
@@ -477,8 +704,7 @@ Array<State> SketchPolicyNode::SampleInitPopulation(const Array<State>& sketches
           fail_ct++;
         }
       }
-    }
-
+    }  // if (!cand_states.empty())
     if (iter % 5 == 0) {
       double duration = std::chrono::duration_cast<std::chrono::duration<double>>(
                             std::chrono::high_resolution_clock::now() - tic_begin)
@@ -513,6 +739,8 @@ Array<State> SketchPolicyNode::SampleInitPopulation(const Array<State>& sketches
 
 Array<State> SketchPolicyNode::EvolutionarySearch(const Array<State>& init_population,
                                                   int out_size) {
+  PrintTitle("Evolutionary Search", verbose);
+
   Array<State> best_states;
   auto tic_begin = std::chrono::high_resolution_clock::now();
 
@@ -561,12 +789,35 @@ Array<State> SketchPolicyNode::EvolutionarySearch(const Array<State>& init_popul
   }
   ComputePrefixSumProb(rule_weights, &rule_selection_probs);
 
+  std::vector<float> occupancy_penalty, padding_penalty,
+                     pop_scores_for_all_wkl_insts;
+
   // Genetic Algorithm
   for (int k = 0; k < num_iters + 1; ++k) {
     // Maintain the heap
-    *pnow = search_task->compute_dag.InferBound(*pnow);
-    PruneInvalidState(search_task, pnow);
-    program_cost_model->Predict(search_task, *pnow, &pop_scores);
+    if (IsDynTask(search_task)) {
+      *pnow = search_task->compute_dag.InferBound(*pnow);
+      PruneInvalidState(search_task, pnow);
+      program_cost_model->PredictForAllInstances(
+            search_task, *pnow, &occupancy_penalty, &padding_penalty,
+            &pop_scores_for_all_wkl_insts
+          );
+      pop_scores.assign(pnow->size(), 0.);
+      for (size_t state_id = 0; state_id < pnow->size(); ++state_id) {
+        for (size_t wkl_inst_id = 0;
+             wkl_inst_id < search_task->wkl_insts.size();
+             ++wkl_inst_id) {
+          pop_scores[state_id] =
+              std::max(pop_scores[state_id],
+                       pop_scores_for_all_wkl_insts[wkl_inst_id * pnow->size() + state_id]);
+        }
+        pop_scores[state_id] = std::pow(pop_scores[state_id], floor_div(n_trials, 100) + 1);
+      }
+    } else {
+      *pnow = search_task->compute_dag.InferBound(*pnow);
+      PruneInvalidState(search_task, pnow);
+      program_cost_model->Predict(search_task, *pnow, &pop_scores);
+    }
 
     for (size_t i = 0; i < pnow->size(); ++i) {
       const State& state = (*pnow)[i];
@@ -611,8 +862,6 @@ Array<State> SketchPolicyNode::EvolutionarySearch(const Array<State>& init_popul
 
     // Compute selection probability
     ComputePrefixSumProb(pop_scores, &pop_selection_probs);
-
-    // TODO(merrymercy, comaniac): add crossover.
 
     // Do mutation
     while (pnext->size() < population) {
@@ -694,7 +943,6 @@ Array<MeasureInput> SketchPolicyNode::PickStatesWithEpsGreedy(const Array<State>
       inputs.push_back(MeasureInput(search_task, state));
     }
   }
-
   return inputs;
 }
 

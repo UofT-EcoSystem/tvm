@@ -84,7 +84,7 @@ EmptyPolicyNode::Search(int num_measure_trials, int early_stopping,
     // Return a state with best measured performance
     return std::make_pair(
              measurer->best_states[search_task->workload_key],
-             measurer->best_wkl_inst_disp_map[search_task->workload_key]
+             measurer->best_wkl_inst_id_disp_map[search_task->workload_key]
            );
   }
 }

@@ -24,6 +24,9 @@
 
 #include "utils.h"
 
+#include <tvm/auto_scheduler/compute_dag.h>
+#include <tvm/auto_scheduler/search_task.h>
+
 namespace tvm {
 namespace auto_scheduler {
 
@@ -80,6 +83,37 @@ double FlopEstimator::EstimateFlop(const Array<te::Operation>& ops) {
   }
 
   return fail_ ? -1 : ret;
+}
+
+double EstimateFlopsForWklInst(const ComputeDAG& compute_dag,
+                               const Array<Var>& shape_vars,
+                               const Array<IntImm>& wkl_insts) {
+  CHECK(shape_vars.size() == wkl_insts.size());
+  Map<String, IntImm> shape_var_value_map;
+  for (size_t i = 0; i < shape_vars.size(); ++i) {
+    shape_var_value_map.Set(shape_vars[i]->name_hint, wkl_insts[i]);
+  }
+  DynShapeVarReplacer replacer(
+      [&shape_var_value_map](const VarNode* op) -> PrimExpr {
+        auto shape_var_value_map_iter =
+            shape_var_value_map.find(op->name_hint);
+        if (shape_var_value_map_iter != shape_var_value_map.end()) {
+          return (*shape_var_value_map_iter).second;
+        }
+        LOG(FATAL) << "Dynamic Axis Node " << GetRef<Var>(op)
+                   << " has not been found in "
+                   << shape_var_value_map;
+        return GetRef<Var>(op);
+      }
+      );
+  te::Schedule sch;
+  Array<te::Tensor> tensors;
+  std::tie(sch, tensors) = compute_dag.ApplySteps({});
+  Array<te::Operation> sch_ops;
+  for (const te::Stage& stage : sch->stages) {
+    sch_ops.push_back(stage->op);
+  }
+  return FlopEstimator(replacer).EstimateFlop(sch_ops);
 }
 
 }  // namespace auto_scheduler

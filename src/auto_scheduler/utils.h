@@ -26,6 +26,7 @@
 #define TVM_AUTO_SCHEDULER_UTILS_H_
 
 #include <dmlc/common.h>
+#include <tvm/auto_scheduler/loop_state.h>
 #include <tvm/arith/analyzer.h>
 #include <tvm/runtime/ndarray.h>
 #include <tvm/te/operation.h>
@@ -71,6 +72,17 @@ struct hash<std::tuple<T1, T2, T3>> {
 }  // namespace std
 
 namespace tvm {
+
+inline size_t floor_by(const size_t a, const size_t b) {
+  CHECK(b != 0);
+  return (a + b - 1) / b * b;
+}
+
+inline size_t floor_div(const size_t a, const size_t b) {
+  CHECK(b != 0);
+  return (a + b - 1) / b;
+}
+
 namespace auto_scheduler {
 
 inline size_t ceil_by(const size_t a, const size_t b) {
@@ -151,7 +163,7 @@ inline std::ostream& operator<<(std::ostream& out, const std::vector<std::vector
 template<typename K, typename V, typename H, typename E>
 inline std::ostream& operator<<(std::ostream& out, const std::unordered_map<K, V, H, E>& map) {
   out << "{" << std::endl;
-  for (const auto& kv : Map) {
+  for (const auto& kv : map) {
     out << "  " << kv.first << " : " << kv.second << std::endl;
   }
   out << "}";
@@ -431,8 +443,7 @@ inline void ParseKernelLayout(const String& layout, Array<PrimExpr>* shape,
 inline std::string AxisBaseName(const std::string& str) { return str.substr(0, str.rfind("_")); }
 
 using te::Operation;
-using tir::DynShapeVarReplacer;
-using tir::ExprFunctor;
+using namespace ::tvm::tir;
 
 class FlopEstimator : public ExprFunctor<double(const PrimExpr& n)> {
  public:
@@ -545,7 +556,7 @@ struct TopKDispatcher {
   TopKDispatcher(const size_t max_num_states = 128)
       : max_num_states_(max_num_states) {}
   /**
-   * 
+   * @brief  Dispatch to workload instances according to adapted scores.
    */
   std::unordered_map<size_t, size_t>
   Dispatch(const std::vector<float>& scores, const size_t num_states);
@@ -571,6 +582,8 @@ struct TopKDispatcher {
                       const std::vector<float>& adapted_candidate_flops);
 };
 
+class SearchTask;
+
 void AdaptStateToWorkload(const SearchTask& task, const State& state,
                           const Array<IntImm>& shape_values,
                           const float score, float* const occupancy_penalty,
@@ -578,10 +591,11 @@ void AdaptStateToWorkload(const SearchTask& task, const State& state,
                           float* const adapted_score
                           );
 
-double EstimateFlopForInst(const ComputeDAG& compute_dag,
-                           // const Array<Step>& transform_steps,
-                           const Array<DynShapeVar>& shape_vars,
-                           const Array<IntImm>& shape_values);
+class ComputeDAG;
+
+double EstimateFlopsForWklInst(const ComputeDAG& compute_dag,
+                               const Array<Var>& shape_vars,
+                               const Array<IntImm>& shape_values);
 
 }  // namespace auto_scheduler
 }  // namespace tvm
