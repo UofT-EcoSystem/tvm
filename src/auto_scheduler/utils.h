@@ -442,6 +442,54 @@ inline void ParseKernelLayout(const String& layout, Array<PrimExpr>* shape,
 /*! \brief Get the base name before '_' of an axis */
 inline std::string AxisBaseName(const std::string& str) { return str.substr(0, str.rfind("_")); }
 
+class SyntheticExprReplacer : public StmtExprMutator {
+ private:
+  Map<ObjectRef, PrimExpr> expr_subst_map_;
+
+  PrimExpr VisitExpr_(const ProducerLoadNode* op) override {
+    auto producer_subst_map_it = producer_subst_map.find(op->producer);
+    if (producer_subst_map_it != producer_subst_map.end()) {
+      return ProducerLoad((*producer_subst_map_it).second,
+                          op->indices);
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+ public:
+  Map<DataProducer, te::Tensor> producer_subst_map;
+
+  SyntheticExprReplacer(const Map<ObjectRef, PrimExpr>& expr_subst_map)
+      : expr_subst_map_(expr_subst_map) {}
+
+  PrimExpr VisitExpr_(const VarNode* op) override final {
+    auto expr_subst_map_it = expr_subst_map_.find(op->name_hint);
+    if (expr_subst_map_it != expr_subst_map_.end()) {
+      return (*expr_subst_map_it).second;
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+  PrimExpr VisitExpr(const PrimExpr& expr) override final {
+    auto expr_subst_map_it = expr_subst_map_.find(expr);
+    if (expr_subst_map_it != expr_subst_map_.end()) {
+      return (*expr_subst_map_it).second;
+    }
+    std::ostringstream strout;
+    strout << expr;
+    std::string expr_str = strout.str();
+    for (const std::pair<ObjectRef, PrimExpr>& kv : expr_subst_map_) {
+      strout.str("");
+      strout.clear();
+      strout << kv.first;
+      std::string k_str = strout.str();
+      if (expr_str == k_str) {
+        return kv.second;
+      }
+    }
+    return StmtExprMutator::VisitExpr(expr);
+  }
+};
+
 using te::Operation;
 using namespace ::tvm::tir;
 

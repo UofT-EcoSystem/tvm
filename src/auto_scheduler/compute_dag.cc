@@ -1186,6 +1186,153 @@ String ComputeDAG::PrintDAG(bool simple_mode) const {
   return String(ss.str());
 }
 
+std::pair<te::Schedule, Array<te::Tensor>>
+ComputeDAG::InstantiateAndApplySteps(
+    const State& state, const Array<Var>& shape_vars,
+    const Array<PrimExpr>& shape_values) const {
+  State state_mutable_copy = state;
+  state_mutable_copy = InferBound(state_mutable_copy);
+  Map<ObjectRef, PrimExpr> axes_to_extents;
+  for (size_t i = 0; i < shape_vars.size(); ++i) {
+    axes_to_extents.Set(shape_vars[i], shape_values[i]);
+  }
+  SyntheticExprReplacer synthetic_expr_replacer(axes_to_extents);
+  return InstantiateAndApplySteps(state_mutable_copy, synthetic_expr_replacer,
+                                  nullptr, nullptr);
+}
+
+std::pair<te::Schedule, Array<te::Tensor>>
+ComputeDAG::InstantiateAndApplySteps(
+    const State& state, SyntheticExprReplacer& replacer,
+    Array<te::Stage>* stages, StageToAxesMap* stage_to_axes) const {
+  Array<te::Tensor> synthetic_tensors;
+
+  Array<te::Stage> tmp_stages;
+  StageToAxesMap   tmp_stage_to_axes;
+  if (stages == nullptr) {
+    stages = &tmp_stages;
+  }
+  if (stage_to_axes == nullptr) {
+    stage_to_axes = &tmp_stage_to_axes;
+  }
+  arith::Analyzer analyzer;
+  for (const te::Tensor& t : operator->()->tensors) {
+    auto instantiate_tensor = 
+        [&analyzer, &replacer](te::Tensor t) -> te::Tensor {
+          Array<PrimExpr> synthetic_shape;
+          for (const PrimExpr& expr : t->shape) {
+            synthetic_shape.push_back(analyzer.Simplify(replacer(expr)));
+          }
+
+          te::Operation synthetic_op;
+          const te::ComputeOpNode* compute_op_node = t->op.as<te::ComputeOpNode>();
+          const te::PlaceholderOpNode* placeholder_op_node =
+              t->op.as<te::PlaceholderOpNode>();
+          if (compute_op_node != nullptr) {
+            Array<IterVar>  synthetic_axis;
+            Array<PrimExpr> synthetic_body;
+            Map<String, ObjectRef> synthetic_attrs;
+            for (const IterVar& iv : compute_op_node->axis) {
+              synthetic_axis.push_back(
+                  tir::IterVar(Range::FromMinExtent(analyzer.Simplify(replacer(iv->dom->min)),
+                                                    analyzer.Simplify(replacer(iv->dom->extent))),
+                               iv->var,
+                               iv->iter_type,
+                               iv->thread_tag
+                               ));
+            }
+            for (const PrimExpr& expr : compute_op_node->body) {
+              synthetic_body.push_back(replacer(expr));
+            }
+            synthetic_op = te::ComputeOp(compute_op_node->name,
+                                         compute_op_node->tag, 
+                                         compute_op_node->attrs, synthetic_axis,
+                                         synthetic_body);
+          } else if (placeholder_op_node != nullptr) {
+            synthetic_op = te::PlaceholderOp(placeholder_op_node->name,
+                                             synthetic_shape,
+                                             placeholder_op_node->dtype);
+          }
+          CHECK(synthetic_op.defined());
+          return te::Tensor(synthetic_shape, t->dtype, synthetic_op, t->value_index);
+        };
+    for (te::Tensor input_tensor : t->op->InputTensors()) {
+      auto producer_subst_map_it = replacer.producer_subst_map.find(input_tensor);
+      if (producer_subst_map_it == replacer.producer_subst_map.end()) {
+        replacer.producer_subst_map.Set(input_tensor, instantiate_tensor(input_tensor));
+      }
+    }
+
+    synthetic_tensors.push_back(instantiate_tensor(t));
+    replacer.producer_subst_map.Set(t, synthetic_tensors.back());
+  }
+
+  AccessAnalyzer synthetic_access_analyzer = AccessAnalyzer(synthetic_tensors);
+  Array<te::Operation> out_ops;
+  for (const te::Operation& op : synthetic_access_analyzer->ops_topo_order) {
+    if (synthetic_access_analyzer.IsOutput(op)) {
+      out_ops.push_back(op);
+    }
+  }
+  te::Schedule synthetic_sch = te::create_schedule(out_ops);
+  for (const te::Stage& stage : synthetic_sch->stages) {
+    stages->push_back(stage);
+    UpdateStageToAxesMap(stage, stage_to_axes);
+  }
+  for (const Step& step : state->transform_steps) {
+    StepApplyToSchedule(step, stages, stage_to_axes, &synthetic_sch,
+                        state->transform_steps);
+  }
+  return std::make_pair(synthetic_sch, synthetic_tensors);
+}
+
+std::tuple<Array<IntImm>, double, float>
+ComputeDAG::CherryPickWklInst(const State& state, const SearchTask& task) const {
+  State state_mutable_copy = state;
+
+  state_mutable_copy = InferBound(state_mutable_copy);
+
+  Array<IntImm> cherry_picked_wkl_inst;
+  const float base_score = 1;
+  float adapted_score, occupancy_penalty, padding_penalty,
+        max_adapted_score = 0.;
+
+  for (const Array<IntImm>& wkl_inst : task->wkl_insts) {
+    AdaptStateToWorkload(task, state_mutable_copy, wkl_inst, base_score,
+                         &occupancy_penalty, &padding_penalty, &adapted_score);
+    if (adapted_score > max_adapted_score) {
+      max_adapted_score = adapted_score;
+      cherry_picked_wkl_inst = wkl_inst;
+    }
+    // In the case when two workloads share the same adaption penalty, pick the
+    // larger one.
+    if (adapted_score == max_adapted_score) {
+      CHECK(wkl_inst.size() == cherry_picked_wkl_inst.size());
+      for (size_t i = 0; i < wkl_inst.size(); ++i) {
+        if (wkl_inst[i]->value > cherry_picked_wkl_inst[i]->value) {
+          cherry_picked_wkl_inst = wkl_inst;
+          break;
+        }
+      }
+    }
+  }
+  double inst_flop =
+      EstimateFlopsForWklInst(task->compute_dag, task->shape_vars.value(),
+                          cherry_picked_wkl_inst);
+  AdaptStateToWorkload(task, state, cherry_picked_wkl_inst, base_score,
+                       &occupancy_penalty, &padding_penalty,
+                       &adapted_score);
+  return std::make_tuple(cherry_picked_wkl_inst, inst_flop, adapted_score);
+}
+
+std::pair<te::Schedule, Array<te::Tensor>>
+ComputeDAG::CherryPickWklInstAndApplySteps(
+    const State& state, const SearchTask& task) const {
+  Array<IntImm> shape_values = std::get<0>(CherryPickWklInst(state, task));
+  return InstantiateAndApplySteps(state, task->shape_vars.value(),
+                                  ToPrimExprArray(shape_values));
+}
+
 State ComputeDAG::InferBound(const State& state) const {
   ICHECK(state->concrete) << "Only concrete state can be processed to get bound info.";
 

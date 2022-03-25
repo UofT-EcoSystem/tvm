@@ -218,7 +218,7 @@ enum class LayoutRewriteOption : int {
 
 class HardwareParams;
 class SearchTask;
-using tir::DynShapeVarReplacer;
+class SyntheticExprReplacer;
 
 /*!
  * \brief Managed reference to ComputeDAGNode.
@@ -279,7 +279,7 @@ class ComputeDAG : public ObjectRef {
 
  private:
   std::pair<te::Schedule, Array<te::Tensor>>
-  InstantiateAndApplySteps(const State& state, DynShapeVarReplacer& replacer,
+  InstantiateAndApplySteps(const State& state, SyntheticExprReplacer& replacer,
                            Array<te::Stage>* stages,
                            StageToAxesMap* stage_to_axes) const;
 
