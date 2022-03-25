@@ -54,6 +54,10 @@ def compile_cuda(code, target="ptx", arch=None, options=None, path_target=None):
     cubin : bytearray
         The bytearray of the cubin
     """
+    if int(os.getenv("DIETCODE_CHECK_REGISTER_SPILL", '0')) or \
+       int(os.getenv("DIETCODE_QUERY_REG_SHMEM_USAGE", '0')):
+        target = "cubin"
+
     temp = utils.tempdir()
     if target not in ["cubin", "ptx", "fatbin"]:
         raise ValueError("target must be in cubin, ptx, fatbin")
@@ -86,6 +90,7 @@ def compile_cuda(code, target="ptx", arch=None, options=None, path_target=None):
         else:
             raise ValueError("options must be str or list of str")
 
+    cmd += ["--ptxas-options=-v"]
     cmd += ["-o", file_target]
     cmd += [temp_code]
 
@@ -106,6 +111,22 @@ def compile_cuda(code, target="ptx", arch=None, options=None, path_target=None):
         msg += "\nCompilation error:\n"
         msg += py_str(out)
         raise RuntimeError(msg)
+
+    import re
+    stack_info_pattern = \
+            re.compile("    ([0-9]+) bytes stack frame, ([0-9]+) bytes spill stores, ([0-9]+) bytes spill loads")
+    stack_info = stack_info_pattern.findall(py_str(out))
+    if len(stack_info) != 0:
+        if int(os.getenv("DIETCODE_CHECK_REGISTER_SPILL", '0')) and \
+           stack_info[0] != ('0', '0', '0'):
+            raise RuntimeError("Register spilling of {} bytes is deemed as " \
+                               "failed compilation".format(stack_info))
+    reg_shmem_info_pattern = \
+            re.compile("ptxas info    : Used ([0-9]+) registers, ([0-9]+) bytes smem")
+    reg_shmem_info = reg_shmem_info_pattern.findall(py_str(out))
+    if len(reg_shmem_info) != 0:
+        if int(os.getenv("DIETCODE_QUERY_REG_SHMEM_USAGE", '0')):
+            raise RuntimeError("({}, {})".format(reg_shmem_info[0][0], reg_shmem_info[0][1]))
 
     data = bytearray(open(file_target, "rb").read())
     if not data:
