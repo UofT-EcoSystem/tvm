@@ -52,7 +52,7 @@ from .relay_integration import (
 )
 from .search_task import SearchTask, TuningOptions, HardwareParams, create_task, auto_schedule
 
-from .dietcode import DietCodeDispatcher, replace_shape_vars,
+from .dietcode import DietCodeDispatcher, replace_shape_vars, \
                       instantiate_dyn_args, serialize_state, deserialize_state
 
 from .search_policy import (
