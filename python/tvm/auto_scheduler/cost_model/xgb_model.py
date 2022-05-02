@@ -27,7 +27,6 @@ from tvm.autotvm.tuner.metric import max_curve
 from .cost_model import PythonBasedModel
 from ..feature import get_per_store_features_from_measure_pairs, \
                       get_per_store_features_from_states, \
-                      get_per_store_features_from_dietcode_measure_pairs, \
                       adapt_states_to_workloads
 from ..measure_record import RecordReader
 

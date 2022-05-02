@@ -18,4 +18,4 @@
 """ Cost model that estimates the performance of programs """
 
 from .cost_model import RandomModel
-from .xgb_model import XGBModel, DietCodeModel
+from .xgb_model import XGBModel
