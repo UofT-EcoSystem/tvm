@@ -33,7 +33,19 @@ namespace tir {
 namespace {
 
 class LocalPadder : public StmtExprMutator {
+ private:
+  Stmt VisitStmt_(const BlockNode* op) final {
 
+
+
+    return StmtExprMutator::VisitStmt_(op);
+  }
+  Stmt VisitStmt_(const BlockRealizeNode* op) final {
+
+
+
+    return StmtExprMutator::VisitStmt_(op);
+  }
 };
 
 }  // anonymous namespace
