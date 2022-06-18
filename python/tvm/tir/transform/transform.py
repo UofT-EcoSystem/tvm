@@ -150,6 +150,17 @@ def LiftAttrScope(attr_key: str):
     return _ffi_api.LiftAttrScope(attr_key)  # type: ignore
 
 
+def LocalPad():
+    """Pad tensors by the size of the local workspace.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LocalPad()  # type: ignore
+
+
 def LoopPartition():
     """Inject virtual thread loops.
 
