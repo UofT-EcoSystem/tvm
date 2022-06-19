@@ -32,26 +32,64 @@ namespace tvm {
 namespace tir {
 namespace {
 
-class LocalPadder : public StmtExprMutator {
+/**
+ * \brief  Verify that all local variables are initialized to the same value.
+ */
+class LocalPadInitChecker : public StmtVisitor {
  private:
-  Stmt VisitStmt_(const BlockNode* op) final {
+  void VisitStmt_(const BufferStoreNode* op) final {
+    if (!inside_init_block_) {
+      return StmtVisitor::VisitStmt_(op);
+    }
+    const PrimExpr& rhs = op->value;
+#define CHECK_INIT_VALUE(imm_node_type)                                                  \
+    if (const imm_node_type* const rhs_val = rhs.as<imm_node_type>()) {                  \
+      if (init_constexpr_.defined()) {                                                   \
+        if (const imm_node_type* const init_val = init_constexpr_.as<imm_node_type>()) { \
+          if (rhs_val->value != init_val->value) {                                       \
+            init_with_single_constexpr_ = false;                                         \
+          }                                                                              \
+        } else {                                                                         \
+          init_with_single_constexpr_ = false;                                           \
+        }                                                                                \
+      } else {                                                                           \
+        init_with_single_constexpr_ = true;                                              \
+        init_constexpr_ = rhs;                                                           \
+      }                                                                                  \
+    }
 
-
-
-    return StmtExprMutator::VisitStmt_(op);
+    CHECK_INIT_VALUE(IntImmNode)
+    CHECK_INIT_VALUE(FloatImmNode)
+    return StmtVisitor::VisitStmt_(op);
   }
-  Stmt VisitStmt_(const BlockRealizeNode* op) final {
-
-
-
-    return StmtExprMutator::VisitStmt_(op);
+  void VisitStmt_(const BlockNode* op) final {
+    // detect the presence of an initialization block
+    if (op->name_hint == "update_init") {
+      inside_init_block_ = true;
+      StmtVisitor::VisitStmt_(op);
+      inside_init_block_ = false;
+      return;
+    }
+    return StmtVisitor::VisitStmt_(op);
   }
+ public:
+  PrimExpr initWithSingleConstExpr() const {
+    if (init_with_single_constexpr_) {
+      return init_constexpr_;
+    }
+    return PrimExpr();
+  }
+ private:
+  bool inside_init_block_ = false;
+  bool init_with_single_constexpr_ = false;
+  PrimExpr init_constexpr_;
 };
 
 }  // anonymous namespace
 
 static Stmt LocalPad(Stmt stmt) {
-  stmt = LocalPadder()(std::move(stmt));
+  LocalPadInitChecker init_checker;
+  init_checker(stmt);
   return stmt;
 }
 
