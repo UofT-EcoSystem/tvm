@@ -73,7 +73,7 @@ class LocalPadInitChecker : public StmtVisitor {
     return StmtVisitor::VisitStmt_(op);
   }
  public:
-  PrimExpr initWithSingleConstExpr() const {
+  PrimExpr useSingleConstExpr() const {
     if (init_with_single_constexpr_) {
       return init_constexpr_;
     }
@@ -90,6 +90,10 @@ class LocalPadInitChecker : public StmtVisitor {
 static Stmt LocalPad(Stmt stmt) {
   LocalPadInitChecker init_checker;
   init_checker(stmt);
+  PrimExpr init_constexpr = init_checker.useSingleConstExpr();
+  if (!init_constexpr.defined()) {
+    return stmt;
+  }
   return stmt;
 }
 
