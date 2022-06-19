@@ -18,16 +18,128 @@
  */
 
 #include <tvm/meta_schedule/postproc.h>
+#include <tvm/tir/stmt.h>
+#include <tvm/tir/stmt_functor.h>
+#include <tvm/tir/transform.h>
+
+#include <regex>
+#include <utility>
 
 namespace tvm {
+namespace tir {
+namespace {
+
+/**
+ * \brief Verify that all local variables are initialized to the same value.
+ */
+class LocalPadInitChecker : public StmtVisitor {
+ private:
+  void VisitStmt_(const BufferStoreNode* op) final {
+    if (!inside_init_block_) {
+      return StmtVisitor::VisitStmt_(op);
+    }
+    const PrimExpr& rhs = op->value;
+#define CHECK_INIT_VALUE(imm_node_type)                                                  \
+    if (const imm_node_type* const rhs_val = rhs.as<imm_node_type>()) {                  \
+      if (init_constexpr_.defined()) {                                                   \
+        if (const imm_node_type* const init_val = init_constexpr_.as<imm_node_type>()) { \
+          if (rhs_val->value != init_val->value) {                                       \
+            init_with_single_constexpr_ = false;                                         \
+          }                                                                              \
+        } else {                                                                         \
+          init_with_single_constexpr_ = false;                                           \
+        }                                                                                \
+      } else {                                                                           \
+        init_with_single_constexpr_ = true;                                              \
+        init_constexpr_ = rhs;                                                           \
+      }                                                                                  \
+    }
+
+    CHECK_INIT_VALUE(IntImmNode)
+    CHECK_INIT_VALUE(FloatImmNode)
+    return StmtVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const BlockNode* op) final {
+    // detect the presence of an initialization block
+    if (op->name_hint == "update_init") {
+      inside_init_block_ = true;
+      StmtVisitor::VisitStmt_(op);
+      inside_init_block_ = false;
+      return;
+    }
+    return StmtVisitor::VisitStmt_(op);
+  }
+ public:
+  PrimExpr useSingleConstExpr() const {
+    if (init_with_single_constexpr_) {
+      return init_constexpr_;
+    }
+    return PrimExpr();
+  }
+ private:
+  bool inside_init_block_ = false;
+  bool init_with_single_constexpr_ = false;
+  PrimExpr init_constexpr_;
+};
+
+class LocalPadder : public StmtMutator {
+ public:
+  explicit LocalPadder(const PrimExpr& init_constexpr) : init_constexpr_(init_constexpr) {}
+ private:
+  Stmt VisitStmt_(const BlockRealizeNode* op) final {
+    // Case #1: Remove all the predicates in the initialization step.
+    if (op->block->name_hint == "update_init") {
+      LOG(INFO) << "Removing predicate=" << op->predicate;
+      return BlockRealize(op->iter_values, Bool(1), op->block);
+    }
+    return StmtMutator::VisitStmt_(op);
+  }
+  const PrimExpr init_constexpr_;
+};
+
+}  // anonymous namespace
+
+static Stmt LocalPad(Stmt stmt) {
+  LocalPadInitChecker init_checker;
+  init_checker(stmt);
+  PrimExpr init_constexpr = init_checker.useSingleConstExpr();
+  // skip the local padding optimization in the case when there is no single
+  // constant expression used for initialization
+  if (!init_constexpr.defined()) {
+    return stmt;
+  }
+  LocalPadder local_padder(init_constexpr);
+  stmt = local_padder(std::move(stmt));
+  return stmt;
+}
+
+namespace transform {
+
+Pass LocalPad() {
+  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+    PrimFuncNode* mutable_func = f.CopyOnWrite();
+    mutable_func->body = LocalPad(std::move(mutable_func->body));
+    return f;
+  };
+  return CreatePrimFuncPass(pass_func, 0, "tir.LocalPad", {});
+}
+
+TVM_REGISTER_GLOBAL("tir.transform.LocalPad").set_body_typed(LocalPad);
+
+}  // namespace transform
+}  // namespace tir
+
 namespace meta_schedule {
 
 class RewriteLocalPadNode : public PostprocNode {
- private:
+ public:
   void InitializeWithTuneContext(const TuneContext& context) final {}
   bool Apply(const tir::Schedule& sch) final {
-
+    return false;
   }
+  void VisitAttrs(tvm::AttrVisitor* v) {}
+  static constexpr const char* _type_key = "meta_schedule.RewriteLocalPad";
+  TVM_DECLARE_FINAL_OBJECT_INFO(RewriteLocalPadNode, PostprocNode);
 };
 
 Postproc Postproc::RewriteLocalPad() {
