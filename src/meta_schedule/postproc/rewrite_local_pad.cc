@@ -89,7 +89,6 @@ class LocalPadder : public StmtMutator {
   Stmt VisitStmt_(const BlockRealizeNode* op) final {
     // Case #1: Remove all the predicates in the initialization step.
     if (op->block->name_hint == "update_init") {
-      LOG(INFO) << "Removing predicate=" << op->predicate;
       return BlockRealize(op->iter_values, Bool(1), op->block);
     }
     return StmtMutator::VisitStmt_(op);
@@ -103,8 +102,8 @@ static Stmt LocalPad(Stmt stmt) {
   LocalPadInitChecker init_checker;
   init_checker(stmt);
   PrimExpr init_constexpr = init_checker.useSingleConstExpr();
-  // skip the local padding optimization in the case when there is no single
-  // constant expression used for initialization
+  // skip the local padding optimization in the case when there is no single constant expression
+  // used for initialization
   if (!init_constexpr.defined()) {
     return stmt;
   }
@@ -130,17 +129,22 @@ TVM_REGISTER_GLOBAL("tir.transform.LocalPad").set_body_typed(LocalPad);
 }  // namespace tir
 
 namespace meta_schedule {
+namespace {
 
 class RewriteLocalPadNode : public PostprocNode {
  public:
   void InitializeWithTuneContext(const TuneContext& context) final {}
   bool Apply(const tir::Schedule& sch) final {
-    return false;
+    tir::transform::Pass local_pad_pass = tir::transform::LocalPad();
+    sch->state().get()->mod = local_pad_pass(sch->state().get()->mod);
+    return true;
   }
   void VisitAttrs(tvm::AttrVisitor* v) {}
   static constexpr const char* _type_key = "meta_schedule.RewriteLocalPad";
   TVM_DECLARE_FINAL_OBJECT_INFO(RewriteLocalPadNode, PostprocNode);
 };
+
+}  // anonymous namespace
 
 Postproc Postproc::RewriteLocalPad() {
   ObjectPtr<RewriteLocalPadNode> n = make_object<RewriteLocalPadNode>();
