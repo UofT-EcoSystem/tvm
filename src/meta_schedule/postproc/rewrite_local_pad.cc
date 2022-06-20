@@ -17,7 +17,6 @@
  * under the License.
  */
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/meta_schedule/postproc.h>
 #include <tvm/tir/stmt.h>
 #include <tvm/tir/stmt_functor.h>
@@ -31,21 +30,17 @@ namespace tvm {
 namespace tir {
 namespace {
 
-inline bool BlockNameMatchesRegexPattern(const String& block_name, const std::string& pattern) {
-  return std::regex_match(std::string(block_name), std::regex(pattern));
-}
-
 struct StorageType {
-  enum MarkerEnum { kGlobal = 0, kShared, kLocal, kOthers };
+  enum { kGlobal = 0, kShared, kLocal, kOthers };
 };
 
 /*!
  * \brief Analyze the read and write accesses of the body statements, used by `LocalPadder`.
  */
-class LocalPadStorageAccessAnalyzer {
+class StorageAccessAnalyzer {
  private:
-  const LocalPadStorageAccessAnalyzer& operator()(const Array<BufferRegion>& buffer_regions) {
-    access_marker_ = std::vector<bool>(static_cast<int>(StorageType::kOthers) + 1, false);
+  const StorageAccessAnalyzer& operator()(const Array<BufferRegion>& buffer_regions) {
+    access_marker_ = std::vector<bool>(StorageType::kOthers + 1, false);
     for (const BufferRegion& buffer_region : buffer_regions) {
       SetStorageAccessMarker_(buffer_region->buffer);
     }
@@ -77,109 +72,143 @@ class LocalPadStorageAccessAnalyzer {
            (access_marker_[StorageType::kShared] || access_marker_[StorageType::kLocal]);
   }
 
-  friend class LocalPadInitChecker;
   friend class LocalPadder;
 };
 
 /*!
- * \brief Verify that all local variables are initialized to the same value.
+ * \brief Verify that all local variables are initialized to the same constant expression.
  */
-class LocalPadInitChecker : public StmtVisitor {
+class InitChecker : public StmtVisitor {
  private:
   void VisitStmt_(const BufferStoreNode* op) final {
     if (!inside_init_block_) {
       return StmtVisitor::VisitStmt_(op);
     }
-    const PrimExpr& rhs = op->value;
     // Read the check the RHS values, make sure that they are the same constant for all the
     // initialization statements.
-#define CHECK_INIT_VALUE(imm_node_type)                                                \
-  if (const imm_node_type* const rhs_val = rhs.as<imm_node_type>()) {                  \
-    if (init_constexpr_.defined()) {                                                   \
-      if (const imm_node_type* const init_val = init_constexpr_.as<imm_node_type>()) { \
-        if (rhs_val->value != init_val->value) {                                       \
-          init_with_single_constexpr_ = false;                                         \
-        }                                                                              \
-      } else {                                                                         \
-        init_with_single_constexpr_ = false;                                           \
-      }                                                                                \
-    } else {                                                                           \
-      init_with_single_constexpr_ = true;                                              \
-      init_constexpr_ = rhs;                                                           \
-    }                                                                                  \
-  }
-
-    CHECK_INIT_VALUE(IntImmNode)
-    CHECK_INIT_VALUE(FloatImmNode)
+    CheckInitValue_<IntImmNode>(op->value);
+    CheckInitValue_<FloatImmNode>(op->value);
     return StmtVisitor::VisitStmt_(op);
   }
-  void VisitStmt_(const BlockNode* op) final {
-    // Detect the presence of an initialization block.
-    if (BlockNameMatchesRegexPattern(op->name_hint, "^(.+)_init$")) {
-      LOG(INFO) << op->reads << " and " << op->writes;
-
-      inside_init_block_ = true;
-      StmtVisitor::VisitStmt_(op);
-      inside_init_block_ = false;
-      return;
+  template<typename ImmNodeType>
+  void CheckInitValue_(const PrimExpr& rhs) {
+    if (const ImmNodeType* const rhs_val = rhs.as<ImmNodeType>()) {
+      if (init_constexpr_.defined()) {
+        if (const ImmNodeType* const init_val = init_constexpr_.as<ImmNodeType>()) {
+          if (rhs_val->value != init_val->value) {
+            init_with_single_constexpr_ = false;
+          }
+        } else {
+          init_with_single_constexpr_ = false;
+        }
+      } else {
+        init_with_single_constexpr_ = true;
+        init_constexpr_ = rhs;
+      }
     }
-    return StmtVisitor::VisitStmt_(op);
+  }
+  void operator()(const Stmt& stmt) {
+    StmtVisitor::operator()(stmt);
+    if (!init_with_single_constexpr_) {
+      init_constexpr_ = PrimExpr();
+    }
   }
 
- public:
-  PrimExpr useSingleConstExpr() const {
-    if (init_with_single_constexpr_) {
-      return init_constexpr_;
-    }
-    return PrimExpr();
-  }
-
- private:
   bool inside_init_block_ = false;
   bool init_with_single_constexpr_ = false;
-  PrimExpr init_constexpr_;
+  PrimExpr init_constexpr_ = PrimExpr();
+
+  friend class LocalPadder;
+};
+
+/*!
+ * \brief Split a predicate into inlinable and non-inlinable component.
+ *
+ *        We refer to "inlinable predicate" as
+ *
+ *            if (predicate) A = ...;
+ *            ↓
+ *            A = predicate ? ... : init_constexpr;
+ *
+ *        Note that not all predicates can be inlined. E.g., `threadIdx.x < 120` cannot be inlined,
+ *        since doing so could lead to invalid memory accesses.
+ */
+class PredicateInliner : public ExprMutator {
+ private:
+  PredicateInliner(const Map<Var, For>& loop_var_stack) : loop_var_stack_(loop_var_stack) {}
+  PrimExpr VisitExpr_(const AndNode* op) final {
+    if (!op->a.as<AndNode>()) {
+      if (!CanInlinePredicate_(op->a)) {
+        non_inlinable_residual_ = non_inlinable_residual_.defined() ?
+                                    (non_inlinable_residual_ && op->a) : op->a;
+        return op->b;
+      }
+    }
+    if (!op->b.as<AndNode>()) {
+      if (!CanInlinePredicate_(op->b)) {
+        non_inlinable_residual_ = non_inlinable_residual_.defined() ?
+                                    (non_inlinable_residual_ && op->b) : op->b;
+        return op->a;
+      }
+    }
+    return ExprMutator::VisitExpr_(op);
+  }
+  PrimExpr VisitExpr_(const )
+
+  bool CanInlinePredicate_(const PrimExpr& predicate) const {
+    replace_mode_ = true;  // Turn on replacement mode that replaces serial and threadIdx variables.
+    replace_mode_ = false;
+  }
+
+  PrimExpr non_inlinable_residual_;
+  const Map<Var, For> loop_var_stack_;
+  bool replace_mode_ = false;
+
+  friend class LocalPadder;
 };
 
 class LocalPadder : public StmtExprMutator {
- public:
-  explicit LocalPadder(const PrimExpr& init_constexpr) : init_constexpr_(init_constexpr) {}
-
  private:
+  bool BlockNameMatchesRegexPattern_(const String& block_name, const std::string& pattern) {
+    return std::regex_match(std::string(block_name), std::regex(pattern));
+  }
+  Stmt VisitStmt_(const ForNode* op) final {
+    loop_var_to_for_map_.Set(op->loop_var, GetRef<For>(op));
+    StmtExprMutator::VisitStmt_(op);
+    loop_var_to_for_map_.erase(op->loop_var);
+  }
+  typedef StorageAccessAnalyzer access_analyzer_;
   Stmt VisitStmt_(const BlockRealizeNode* op) final {
-    if (BlockNameMatchesRegexPattern(op->block->name_hint, "^(.+)_init$")) {
+    if (access_analyzer_()(op->block->reads).NoAccesses_() &&
+        access_analyzer_()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
+      if (!BlockNameMatchesRegexPattern_(op->block->name_hint, "^(.+)_init$")) {
+        LOG(WARNING) << "Treating " << op->block << " as an initialization block "
+                        "as it only has local/shared memory writes";
+      }
+      init_checker_(op->block);
       // Remove all the predicates in the initialization step.
       return BlockRealize(op->iter_values, Bool(1), Downcast<Block>(VisitStmt(op->block)));
+    } else if (access_analyzer_()(op->block->reads).OnlyGlobalAccesses_() &&
+               access_analyzer_()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
+      return StmtMutator::VisitStmt_(op);
+    } else if (access_analyzer_()(op->block->reads).OnlyLocalOrSharedAccesses_() &&
+               access_analyzer_()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
+      // Remove all the predicates in the compute step.
+      return BlockRealize(op->iter_values, Bool(1), Downcast<Block>(VisitStmt(op->block)));
     }
-    // Analyze the buffer read and write accesses.
-    LocalPadStorageAccessAnalyzer access_analyzer;
-    access_analyzer(op->block->reads);
     return StmtMutator::VisitStmt_(op);
   }
-  const PrimExpr init_constexpr_;
-  PrimExpr inlinable_predicate_;  // We refer to "inlinable predicate" as
-                                  //
-                                  //     if (predicate) A = ...;
-                                  //     ↓
-                                  //     A = predicate ? ... : init_constexpr;
-                                  //
-                                  // Note that not all predicates can be inlined. E.g.,
-                                  // `threadIdx.x < 120` cannot be inlined, since doing so could
-                                  // lead to invalid memory accesses.
-  arith::Analyzer analyzer_;
+
+  InitChecker init_checker_;
+  Map<Var, For> loop_var_stack_;
 };
 
 }  // anonymous namespace
 
 static Stmt LocalPad(Stmt stmt) {
-  LocalPadInitChecker init_checker;
-  init_checker(stmt);
-  PrimExpr init_constexpr = init_checker.useSingleConstExpr();
   // Skip the local padding optimization in the case when there is no single constant expression
   // used for initialization.
-  if (!init_constexpr.defined()) {
-    return stmt;
-  }
-  LocalPadder local_padder(init_constexpr);
+  LocalPadder local_padder;
   stmt = local_padder(std::move(stmt));
   return stmt;
 }
