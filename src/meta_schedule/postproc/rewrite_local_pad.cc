@@ -85,9 +85,6 @@ class StorageAccessAnalyzer {
 class InitChecker : public StmtVisitor {
  private:
   void VisitStmt_(const BufferStoreNode* op) final {
-    if (!inside_init_block_) {
-      return StmtVisitor::VisitStmt_(op);
-    }
     // Read the check the RHS values, make sure that they are the same constant for all the
     // initialization statements.
     CheckInitValue_<IntImmNode>(op->value);
@@ -118,7 +115,6 @@ class InitChecker : public StmtVisitor {
     }
   }
 
-  bool inside_init_block_ = false;
   bool init_with_single_constexpr_ = false;
   PrimExpr init_constexpr_;
 
@@ -172,7 +168,7 @@ class PredicateInliner : public ExprMutator {
     return predicate_inlinable_;
   }
 
-  PrimExpr non_inlinable_residual_;
+  PrimExpr non_inlinable_residual_ = Bool(true);
   bool predicate_inlinable_ = false;
 
   friend class LocalPadder;
