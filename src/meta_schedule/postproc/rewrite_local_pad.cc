@@ -120,7 +120,7 @@ class InitChecker : public StmtVisitor {
 
   bool inside_init_block_ = false;
   bool init_with_single_constexpr_ = false;
-  PrimExpr init_constexpr_ = PrimExpr();
+  PrimExpr init_constexpr_;
 
   friend class LocalPadder;
 };
@@ -156,11 +156,6 @@ class PredicateInliner : public ExprMutator {
     }
     return ExprMutator::VisitExpr_(op);
   }
-
-  struct IterVarType {
-    enum { kThreadIdx = 0, kOthers };
-  };
-
   PrimExpr VisitExpr_(const VarNode* op) final {
     if (!NameMatchesRegexPattern(op->name_hint, "((ax\\d_)+)fused_(\\d+)")) {
       predicate_inlinable_ = true;
@@ -194,26 +189,53 @@ class LocalPadder : public StmtExprMutator {
       }
       init_checker_(op->block);
       // Remove all the predicates in the initialization step.
-      return BlockRealize(op->iter_values, Bool(1),
+      return BlockRealize(op->iter_values, Bool(true),
                           Downcast<Block>(StmtExprMutator::VisitStmt(op->block)));
     } else if (StorageAccessAnalyzer()(op->block->reads).OnlyGlobalAccesses_() &&
                StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
+      if (!init_checker_.init_constexpr_.defined()) {
+        return StmtExprMutator::VisitStmt_(op);
+      }
       PredicateInliner predicate_inliner;
       predicate_stack_.push_back(predicate_inliner(op->predicate));
+      enable_padding_ = true;
       Block op_block = Downcast<Block>(VisitStmt(op->block));
+      enable_padding_ = false;
       predicate_stack_.pop_back();
       return BlockRealize(op->iter_values, predicate_inliner.non_inlinable_residual_, op_block);
     } else if (StorageAccessAnalyzer()(op->block->reads).OnlyLocalOrSharedAccesses_() &&
                StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
       // Remove all the predicates in the compute step.
-      return BlockRealize(op->iter_values, Bool(1),
+      return BlockRealize(op->iter_values, Bool(true),
                           Downcast<Block>(StmtExprMutator::VisitStmt(op->block)));
     }
     return StmtMutator::VisitStmt_(op);
   }
+  Stmt VisitStmt_(const BufferStoreNode* op) final {
+    if (!enable_padding_) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+    return BufferStore(op->buffer, Select(ComposePredicate_(), op->value,
+                                          ComposePaddedValue_(op->value->dtype)),
+                       op->indices);
+  }
+  PrimExpr ComposePredicate_() const {
+    PrimExpr predicate = Bool(true);
+    for (PrimExpr expr : predicate_stack_) {
+      predicate = And(predicate, expr);
+    }
+    return predicate;
+  }
+  PrimExpr ComposePaddedValue_(const DataType& dtype) const {
+    if (init_checker_.init_constexpr_->dtype != dtype) {
+      return Cast(dtype, init_checker_.init_constexpr_);
+    }
+    return init_checker_.init_constexpr_;
+  }
 
   InitChecker init_checker_;
   std::vector<PrimExpr> predicate_stack_;
+  bool enable_padding_ = false;
 };
 
 }  // anonymous namespace
