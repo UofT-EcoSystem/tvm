@@ -64,22 +64,17 @@ class LocalPadStorageAccessAnalyzer {
     }
   }
   bool NoAccesses_() const {
-    return !(access_marker_[StorageType::kGlobal] ||
-             access_marker_[StorageType::kShared] ||
-             access_marker_[StorageType::kLocal] ||
-             access_marker_[StorageType::kOthers]);
+    return !(access_marker_[StorageType::kGlobal] || access_marker_[StorageType::kShared] ||
+             access_marker_[StorageType::kLocal] || access_marker_[StorageType::kOthers]);
   }
   bool OnlyGlobalAccesses_() const {
-    return !(access_marker_[StorageType::kShared] ||
-             access_marker_[StorageType::kLocal] ||
+    return !(access_marker_[StorageType::kShared] || access_marker_[StorageType::kLocal] ||
              access_marker_[StorageType::kOthers]) &&
            access_marker_[StorageType::kGlobal];
   }
   bool OnlyLocalOrSharedAccesses_() const {
-    return !(access_marker_[StorageType::kGlobal] ||
-             access_marker_[StorageType::kOthers]) &&
-           (access_marker_[StorageType::kShared] ||
-            access_marker_[StorageType::kLocal]);
+    return !(access_marker_[StorageType::kGlobal] || access_marker_[StorageType::kOthers]) &&
+           (access_marker_[StorageType::kShared] || access_marker_[StorageType::kLocal]);
   }
 
   friend class LocalPadInitChecker;
@@ -98,21 +93,21 @@ class LocalPadInitChecker : public StmtVisitor {
     const PrimExpr& rhs = op->value;
     // Read the check the RHS values, make sure that they are the same constant for all the
     // initialization statements.
-#define CHECK_INIT_VALUE(imm_node_type)                                                  \
-    if (const imm_node_type* const rhs_val = rhs.as<imm_node_type>()) {                  \
-      if (init_constexpr_.defined()) {                                                   \
-        if (const imm_node_type* const init_val = init_constexpr_.as<imm_node_type>()) { \
-          if (rhs_val->value != init_val->value) {                                       \
-            init_with_single_constexpr_ = false;                                         \
-          }                                                                              \
-        } else {                                                                         \
-          init_with_single_constexpr_ = false;                                           \
-        }                                                                                \
-      } else {                                                                           \
-        init_with_single_constexpr_ = true;                                              \
-        init_constexpr_ = rhs;                                                           \
-      }                                                                                  \
-    }
+#define CHECK_INIT_VALUE(imm_node_type)                                                \
+  if (const imm_node_type* const rhs_val = rhs.as<imm_node_type>()) {                  \
+    if (init_constexpr_.defined()) {                                                   \
+      if (const imm_node_type* const init_val = init_constexpr_.as<imm_node_type>()) { \
+        if (rhs_val->value != init_val->value) {                                       \
+          init_with_single_constexpr_ = false;                                         \
+        }                                                                              \
+      } else {                                                                         \
+        init_with_single_constexpr_ = false;                                           \
+      }                                                                                \
+    } else {                                                                           \
+      init_with_single_constexpr_ = true;                                              \
+      init_constexpr_ = rhs;                                                           \
+    }                                                                                  \
+  }
 
     CHECK_INIT_VALUE(IntImmNode)
     CHECK_INIT_VALUE(FloatImmNode)
@@ -122,7 +117,6 @@ class LocalPadInitChecker : public StmtVisitor {
     // Detect the presence of an initialization block.
     if (BlockNameMatchesRegexPattern(op->name_hint, "^(.+)_init$")) {
       LOG(INFO) << op->reads << " and " << op->writes;
-
 
       inside_init_block_ = true;
       StmtVisitor::VisitStmt_(op);
