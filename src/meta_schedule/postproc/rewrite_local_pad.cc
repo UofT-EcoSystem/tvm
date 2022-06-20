@@ -30,15 +30,19 @@ namespace tvm {
 namespace tir {
 namespace {
 
-struct StorageType {
-  enum { kGlobal = 0, kShared, kLocal, kOthers };
-};
+inline bool NameMatchesRegexPattern(const String& name, const std::string& pattern) {
+  return std::regex_match(std::string(name), std::regex(pattern));
+}
 
 /*!
  * \brief Analyze the read and write accesses of the body statements, used by `LocalPadder`.
  */
 class StorageAccessAnalyzer {
  private:
+  struct StorageType {
+    enum { kGlobal = 0, kShared, kLocal, kOthers };
+  };
+
   const StorageAccessAnalyzer& operator()(const Array<BufferRegion>& buffer_regions) {
     access_marker_ = std::vector<bool>(StorageType::kOthers + 1, false);
     for (const BufferRegion& buffer_region : buffer_regions) {
@@ -140,66 +144,105 @@ class PredicateInliner : public ExprMutator {
     if (!op->a.as<AndNode>()) {
       if (!CanInlinePredicate_(op->a)) {
         non_inlinable_residual_ = non_inlinable_residual_.defined() ?
-                                    (non_inlinable_residual_ && op->a) : op->a;
+                                    And(non_inlinable_residual_, op->a) : op->a;
         return op->b;
       }
     }
     if (!op->b.as<AndNode>()) {
       if (!CanInlinePredicate_(op->b)) {
         non_inlinable_residual_ = non_inlinable_residual_.defined() ?
-                                    (non_inlinable_residual_ && op->b) : op->b;
+                                    And(non_inlinable_residual_, op->b) : op->b;
         return op->a;
       }
     }
     return ExprMutator::VisitExpr_(op);
   }
-  PrimExpr VisitExpr_(const )
 
-  bool CanInlinePredicate_(const PrimExpr& predicate) const {
-    replace_mode_ = true;  // Turn on replacement mode that replaces serial and threadIdx variables.
-    replace_mode_ = false;
+  struct IterVarType {
+    enum { kThreadIdx = 0, kOthers };
+  };
+
+  PrimExpr VisitExpr_(const VarNode* op) final {
+    if (!predicate_check_mode_) {
+      return ExprMutator::VisitExpr_(op);
+    }
+    auto for_loop_it = loop_var_stack_.find(GetRef<Var>(op));
+    if (for_loop_it == loop_var_stack_.end()) {
+      predicate_var_access_marker_[IterVarType::kOthers] = true;
+      return ExprMutator::VisitExpr_(op);
+    }
+    if ((*for_loop_it).second->kind == ForKind::kSerial) {
+      // Ignore serial loops since they do not affect the decision.
+      return ExprMutator::VisitExpr_(op);
+    }
+    if ((*for_loop_it).second->thread_binding) {
+      IterVar iv = (*for_loop_it).second->thread_binding.value();
+      if (NameMatchesRegexPattern(iv->thread_tag, "^threadIdx[.](x|y|z)$")) {
+        predicate_var_access_marker_[IterVarType::kThreadIdx] = true;
+      }
+    }
+    predicate_var_access_marker_[IterVarType::kOthers] = true;
+    return ExprMutator::VisitExpr_(op);
+  }
+  /*!
+   * \brief Check if a predicate can be inlined. We cannot inline a predicate if it consists of
+   *        `threadIdx.*` and serial iteration variables. 
+   */
+  bool CanInlinePredicate_(const PrimExpr& predicate) {
+    predicate_check_mode_ = true;
+    predicate_var_access_marker_ = std::vector<bool>(IterVarType::kOthers + 1, false);
+    VisitExpr(predicate);
+    predicate_check_mode_ = false;
+    return predicate_var_access_marker_[IterVarType::kThreadIdx] &&
+           !predicate_var_access_marker_[IterVarType::kOthers];
   }
 
   PrimExpr non_inlinable_residual_;
   const Map<Var, For> loop_var_stack_;
-  bool replace_mode_ = false;
+  bool predicate_check_mode_ = false;
+  std::vector<bool> predicate_var_access_marker_;
 
   friend class LocalPadder;
 };
 
 class LocalPadder : public StmtExprMutator {
  private:
-  bool BlockNameMatchesRegexPattern_(const String& block_name, const std::string& pattern) {
-    return std::regex_match(std::string(block_name), std::regex(pattern));
-  }
   Stmt VisitStmt_(const ForNode* op) final {
-    loop_var_to_for_map_.Set(op->loop_var, GetRef<For>(op));
-    StmtExprMutator::VisitStmt_(op);
-    loop_var_to_for_map_.erase(op->loop_var);
+    loop_var_stack_.Set(op->loop_var, GetRef<For>(op));
+    Stmt ret = StmtExprMutator::VisitStmt_(op);
+    loop_var_stack_.erase(op->loop_var);
+    return ret;
   }
-  typedef StorageAccessAnalyzer access_analyzer_;
+
   Stmt VisitStmt_(const BlockRealizeNode* op) final {
-    if (access_analyzer_()(op->block->reads).NoAccesses_() &&
-        access_analyzer_()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
-      if (!BlockNameMatchesRegexPattern_(op->block->name_hint, "^(.+)_init$")) {
+    if (StorageAccessAnalyzer()(op->block->reads).NoAccesses_() &&
+        StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
+      if (!NameMatchesRegexPattern(op->block->name_hint, "^(.+)_init$")) {
         LOG(WARNING) << "Treating " << op->block << " as an initialization block "
                         "as it only has local/shared memory writes";
       }
       init_checker_(op->block);
       // Remove all the predicates in the initialization step.
-      return BlockRealize(op->iter_values, Bool(1), Downcast<Block>(VisitStmt(op->block)));
-    } else if (access_analyzer_()(op->block->reads).OnlyGlobalAccesses_() &&
-               access_analyzer_()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
-      return StmtMutator::VisitStmt_(op);
-    } else if (access_analyzer_()(op->block->reads).OnlyLocalOrSharedAccesses_() &&
-               access_analyzer_()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
+      // BlockRealize ret = VisitStmt(op->block);
+      return BlockRealize(ret->iter_values, Bool(1), ret->block);
+    } else if (StorageAccessAnalyzer()(op->block->reads).OnlyGlobalAccesses_() &&
+               StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
+      PredicateInliner predicate_inliner;
+      predicate_stack_.push_back(predicate_inliner(op->predicate));
+      BlockRealize ret = VisitStmt(op->block);
+      predicate_stack_.pop_back();
+      return BlockRealize(ret->iter_values, predicate_inliner.non_inlinable_residual_, ret->block);
+    } else if (StorageAccessAnalyzer()(op->block->reads).OnlyLocalOrSharedAccesses_() &&
+               StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
       // Remove all the predicates in the compute step.
-      return BlockRealize(op->iter_values, Bool(1), Downcast<Block>(VisitStmt(op->block)));
+      BlockRealize ret = VisitStmt(op->block);
+      return BlockRealize(ret->iter_values, Bool(1), ret->block);
     }
     return StmtMutator::VisitStmt_(op);
   }
 
   InitChecker init_checker_;
+  std::vector<PrimExpr> predicate_stack_;
   Map<Var, For> loop_var_stack_;
 };
 
