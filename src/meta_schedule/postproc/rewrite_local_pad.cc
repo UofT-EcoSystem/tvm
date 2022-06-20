@@ -31,7 +31,7 @@ namespace tvm {
 namespace tir {
 namespace {
 
-inline bool blockNameMatchesPattern(const String& block_name, const std::string& pattern) {
+inline bool BlockNameMatchesRegexPattern(const String& block_name, const std::string& pattern) {
   return std::regex_match(std::string(block_name), std::regex(pattern));
 }
 
@@ -45,29 +45,46 @@ enum class StorageType {
 /*!
  * \brief Analyze the read and write accesses of the body statements, used by `LocalPadder`.
  */
-class LocalPadStorageAccessAnalyzer : public StmtExprVisitor {
+class StorageAccessAnalyzer {
  private:
-  void VisitExpr_(const BufferLoadNode* op) final {
-    setStorageAccessMarker(op->buffer, &read_accesses_);
-    return StmtExprVisitor::VisitExpr_(op);
+  StorageAccessAnalyzer& operator()(const Array<BufferRegion>& buffer_regions) {
+    access_marker_ = std::vector<bool>(int(StorageType::kOthers) + 1, false);
+    for (const BufferRegion& buffer_region : buffer_regions) {
+      SetStorageAccessMarker_(buffer_region->buffer);
+    }
+    return *this;
   }
-  void VisitStmt_(const BufferStoreNode* op) final {
-    setStorageAccessMarker(op->buffer, &write_accesses_);
-    return StmtExprVisitor::VisitStmt_(op);
-  }
-  std::vector<bool> read_accesses_ = std::vector<bool>(int(StorageType::kOthers) + 1, false);
-  std::vector<bool> write_accesses_ = std::vector<bool>(int(StorageType::kOthers) + 1, false);
-  void setStorageAccessMarker(const Buffer& buf, std::vector<bool>* const access_marker) {
+  std::vector<bool> access_marker_;
+  void SetStorageAccessMarker_(const Buffer& buf) {
     if (buf.scope() == "global") {
-      (*access_marker)[int(StorageType::kGlobal)] = true;
+      access_marker_[int(StorageType::kGlobal)] = true;
     } else if (buf.scope() == "shared") {
-      (*access_marker)[int(StorageType::kShared)] = true;
+      access_marker_[int(StorageType::kShared)] = true;
     } else if (buf.scope() == "local") {
-      (*access_marker)[int(StorageType::kLocal)] = true;
+      access_marker_[int(StorageType::kLocal)] = true;
     } else {
-      (*access_marker)[int(StorageType::kOthers)] = true;
+      access_marker_[int(StorageType::kOthers)] = true;
     }
   }
+  bool NoAccesses_() const {
+    return !(access_marker_[int(StorageType::kGlobal)] ||
+             access_marker_[int(StorageType::kShared)] ||
+             access_marker_[int(StorageType::kLocal)] ||
+             access_marker_[int(StorageType::kOthers)]);
+  }
+  bool OnlyGlobalAccesses_() const {
+    return !(access_marker_[int(StorageType::kShared)] ||
+             access_marker_[int(StorageType::kLocal)] ||
+             access_marker_[int(StorageType::kOthers)]) &&
+           access_marker_[int(StorageType::kGlobal)];
+  }
+  bool OnlyLocalOrSharedAccesses_() const {
+    return !(access_marker_[int(StorageType::kGlobal)] ||
+             access_marker_[int(StorageType::kOthers)]) &&
+           (access_marker_[int(StorageType::kShared)] ||
+            access_marker_[int(StorageType::kLocal)]);
+  }
+
   friend class LocalPadInitChecker;
   friend class LocalPadder;
 };
@@ -105,8 +122,11 @@ class LocalPadInitChecker : public StmtVisitor {
     return StmtVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const BlockNode* op) final {
-    // detect the presence of an initialization block
-    if (blockNameMatchesPattern(op->name_hint, "^(.+)_init$")) {
+    // Detect the presence of an initialization block.
+    if (BlockNameMatchesRegexPattern(op->name_hint, "^(.+)_init$")) {
+      LOG(INFO) << op->reads << " and " << op->writes;
+
+
       inside_init_block_ = true;
       StmtVisitor::VisitStmt_(op);
       inside_init_block_ = false;
