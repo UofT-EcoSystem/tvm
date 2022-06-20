@@ -35,20 +35,17 @@ inline bool BlockNameMatchesRegexPattern(const String& block_name, const std::st
   return std::regex_match(std::string(block_name), std::regex(pattern));
 }
 
-enum class StorageType {
-  kGlobal = 0,
-  kShared,
-  kLocal,
-  kOthers
+struct StorageType {
+  enum MarkerEnum { kGlobal = 0, kShared, kLocal, kOthers };
 };
 
 /*!
  * \brief Analyze the read and write accesses of the body statements, used by `LocalPadder`.
  */
-class StorageAccessAnalyzer {
+class LocalPadStorageAccessAnalyzer {
  private:
-  StorageAccessAnalyzer& operator()(const Array<BufferRegion>& buffer_regions) {
-    access_marker_ = std::vector<bool>(int(StorageType::kOthers) + 1, false);
+  const LocalPadStorageAccessAnalyzer& operator()(const Array<BufferRegion>& buffer_regions) {
+    access_marker_ = std::vector<bool>(static_cast<int>(StorageType::kOthers) + 1, false);
     for (const BufferRegion& buffer_region : buffer_regions) {
       SetStorageAccessMarker_(buffer_region->buffer);
     }
@@ -57,32 +54,32 @@ class StorageAccessAnalyzer {
   std::vector<bool> access_marker_;
   void SetStorageAccessMarker_(const Buffer& buf) {
     if (buf.scope() == "global") {
-      access_marker_[int(StorageType::kGlobal)] = true;
+      access_marker_[StorageType::kGlobal] = true;
     } else if (buf.scope() == "shared") {
-      access_marker_[int(StorageType::kShared)] = true;
+      access_marker_[StorageType::kShared] = true;
     } else if (buf.scope() == "local") {
-      access_marker_[int(StorageType::kLocal)] = true;
+      access_marker_[StorageType::kLocal] = true;
     } else {
-      access_marker_[int(StorageType::kOthers)] = true;
+      access_marker_[StorageType::kOthers] = true;
     }
   }
   bool NoAccesses_() const {
-    return !(access_marker_[int(StorageType::kGlobal)] ||
-             access_marker_[int(StorageType::kShared)] ||
-             access_marker_[int(StorageType::kLocal)] ||
-             access_marker_[int(StorageType::kOthers)]);
+    return !(access_marker_[StorageType::kGlobal] ||
+             access_marker_[StorageType::kShared] ||
+             access_marker_[StorageType::kLocal] ||
+             access_marker_[StorageType::kOthers]);
   }
   bool OnlyGlobalAccesses_() const {
-    return !(access_marker_[int(StorageType::kShared)] ||
-             access_marker_[int(StorageType::kLocal)] ||
-             access_marker_[int(StorageType::kOthers)]) &&
-           access_marker_[int(StorageType::kGlobal)];
+    return !(access_marker_[StorageType::kShared] ||
+             access_marker_[StorageType::kLocal] ||
+             access_marker_[StorageType::kOthers]) &&
+           access_marker_[StorageType::kGlobal];
   }
   bool OnlyLocalOrSharedAccesses_() const {
-    return !(access_marker_[int(StorageType::kGlobal)] ||
-             access_marker_[int(StorageType::kOthers)]) &&
-           (access_marker_[int(StorageType::kShared)] ||
-            access_marker_[int(StorageType::kLocal)]);
+    return !(access_marker_[StorageType::kGlobal] ||
+             access_marker_[StorageType::kOthers]) &&
+           (access_marker_[StorageType::kShared] ||
+            access_marker_[StorageType::kLocal]);
   }
 
   friend class LocalPadInitChecker;
@@ -134,6 +131,7 @@ class LocalPadInitChecker : public StmtVisitor {
     }
     return StmtVisitor::VisitStmt_(op);
   }
+
  public:
   PrimExpr useSingleConstExpr() const {
     if (init_with_single_constexpr_) {
@@ -141,6 +139,7 @@ class LocalPadInitChecker : public StmtVisitor {
     }
     return PrimExpr();
   }
+
  private:
   bool inside_init_block_ = false;
   bool init_with_single_constexpr_ = false;
@@ -150,15 +149,16 @@ class LocalPadInitChecker : public StmtVisitor {
 class LocalPadder : public StmtExprMutator {
  public:
   explicit LocalPadder(const PrimExpr& init_constexpr) : init_constexpr_(init_constexpr) {}
+
  private:
   Stmt VisitStmt_(const BlockRealizeNode* op) final {
-    if (blockNameMatchesPattern(op->block->name_hint, "^(.+)_init$")) {
+    if (BlockNameMatchesRegexPattern(op->block->name_hint, "^(.+)_init$")) {
       // Remove all the predicates in the initialization step.
       return BlockRealize(op->iter_values, Bool(1), Downcast<Block>(VisitStmt(op->block)));
     }
     // Analyze the buffer read and write accesses.
     LocalPadStorageAccessAnalyzer access_analyzer;
-    access_analyzer(op->block);
+    access_analyzer(op->block->reads);
     return StmtMutator::VisitStmt_(op);
   }
   const PrimExpr init_constexpr_;
