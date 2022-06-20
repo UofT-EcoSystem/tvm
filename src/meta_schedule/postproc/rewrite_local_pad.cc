@@ -29,7 +29,11 @@ namespace tvm {
 namespace tir {
 namespace {
 
-/**
+inline bool blockNameMatchesPattern(const String& block_name, const std::string& pattern) {
+  return std::regex_match(std::string(block_name), std::regex(pattern));
+}
+
+/*!
  * \brief Verify that all local variables are initialized to the same value.
  */
 class LocalPadInitChecker : public StmtVisitor {
@@ -61,7 +65,7 @@ class LocalPadInitChecker : public StmtVisitor {
   }
   void VisitStmt_(const BlockNode* op) final {
     // detect the presence of an initialization block
-    if (op->name_hint == "update_init") {
+    if (blockNameMatchesPattern(op->name_hint, "^(.+)_init$")) {
       inside_init_block_ = true;
       StmtVisitor::VisitStmt_(op);
       inside_init_block_ = false;
@@ -86,9 +90,12 @@ class LocalPadder : public StmtMutator {
  public:
   explicit LocalPadder(const PrimExpr& init_constexpr) : init_constexpr_(init_constexpr) {}
  private:
+  Stmt VisitStmt_(const BufferStoreNode* op) final {
+
+  }
   Stmt VisitStmt_(const BlockRealizeNode* op) final {
     // Case #1: Remove all the predicates in the initialization step.
-    if (op->block->name_hint == "update_init") {
+    if (blockNameMatchesPattern(op->block->name_hint, "^(.+)_init$")) {
       return BlockRealize(op->iter_values, Bool(1), op->block);
     }
     return StmtMutator::VisitStmt_(op);
