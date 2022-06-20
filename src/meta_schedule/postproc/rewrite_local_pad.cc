@@ -17,6 +17,7 @@
  * under the License.
  */
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/meta_schedule/postproc.h>
 #include <tvm/tir/stmt.h>
 #include <tvm/tir/stmt_functor.h>
@@ -24,6 +25,7 @@
 
 #include <regex>
 #include <utility>
+#include <vector>
 
 namespace tvm {
 namespace tir {
@@ -32,6 +34,43 @@ namespace {
 inline bool blockNameMatchesPattern(const String& block_name, const std::string& pattern) {
   return std::regex_match(std::string(block_name), std::regex(pattern));
 }
+
+enum class StorageType {
+  kGlobal = 0,
+  kShared,
+  kLocal,
+  kOthers
+};
+
+/*!
+ * \brief Analyze the read and write accesses of the body statements, used by `LocalPadder`.
+ */
+class LocalPadStorageAccessAnalyzer : public StmtExprVisitor {
+ private:
+  void VisitExpr_(const BufferLoadNode* op) final {
+    setStorageAccessMarker(op->buffer, &read_accesses_);
+    return StmtExprVisitor::VisitExpr_(op);
+  }
+  void VisitStmt_(const BufferStoreNode* op) final {
+    setStorageAccessMarker(op->buffer, &write_accesses_);
+    return StmtExprVisitor::VisitStmt_(op);
+  }
+  std::vector<bool> read_accesses_ = std::vector<bool>(int(StorageType::kOthers) + 1, false);
+  std::vector<bool> write_accesses_ = std::vector<bool>(int(StorageType::kOthers) + 1, false);
+  void setStorageAccessMarker(const Buffer& buf, std::vector<bool>* const access_marker) {
+    if (buf.scope() == "global") {
+      (*access_marker)[int(StorageType::kGlobal)] = true;
+    } else if (buf.scope() == "shared") {
+      (*access_marker)[int(StorageType::kShared)] = true;
+    } else if (buf.scope() == "local") {
+      (*access_marker)[int(StorageType::kLocal)] = true;
+    } else {
+      (*access_marker)[int(StorageType::kOthers)] = true;
+    }
+  }
+  friend class LocalPadInitChecker;
+  friend class LocalPadder;
+};
 
 /*!
  * \brief Verify that all local variables are initialized to the same value.
@@ -43,6 +82,8 @@ class LocalPadInitChecker : public StmtVisitor {
       return StmtVisitor::VisitStmt_(op);
     }
     const PrimExpr& rhs = op->value;
+    // Read the check the RHS values, make sure that they are the same constant for all the
+    // initialization statements.
 #define CHECK_INIT_VALUE(imm_node_type)                                                  \
     if (const imm_node_type* const rhs_val = rhs.as<imm_node_type>()) {                  \
       if (init_constexpr_.defined()) {                                                   \
@@ -86,21 +127,31 @@ class LocalPadInitChecker : public StmtVisitor {
   PrimExpr init_constexpr_;
 };
 
-class LocalPadder : public StmtMutator {
+class LocalPadder : public StmtExprMutator {
  public:
   explicit LocalPadder(const PrimExpr& init_constexpr) : init_constexpr_(init_constexpr) {}
  private:
-  Stmt VisitStmt_(const BufferStoreNode* op) final {
-
-  }
   Stmt VisitStmt_(const BlockRealizeNode* op) final {
-    // Case #1: Remove all the predicates in the initialization step.
     if (blockNameMatchesPattern(op->block->name_hint, "^(.+)_init$")) {
-      return BlockRealize(op->iter_values, Bool(1), op->block);
+      // Remove all the predicates in the initialization step.
+      return BlockRealize(op->iter_values, Bool(1), Downcast<Block>(VisitStmt(op->block)));
     }
+    // Analyze the buffer read and write accesses.
+    LocalPadStorageAccessAnalyzer access_analyzer;
+    access_analyzer(op->block);
     return StmtMutator::VisitStmt_(op);
   }
   const PrimExpr init_constexpr_;
+  PrimExpr inlinable_predicate_;  // We refer to "inlinable predicate" as
+                                  //
+                                  //     if (predicate) A = ...;
+                                  //     ↓
+                                  //     A = predicate ? ... : init_constexpr;
+                                  //
+                                  // Note that not all predicates can be inlined. E.g.,
+                                  // `threadIdx.x < 120` cannot be inlined, since doing so could
+                                  // lead to invalid memory accesses.
+  arith::Analyzer analyzer_;
 };
 
 }  // anonymous namespace
@@ -109,8 +160,8 @@ static Stmt LocalPad(Stmt stmt) {
   LocalPadInitChecker init_checker;
   init_checker(stmt);
   PrimExpr init_constexpr = init_checker.useSingleConstExpr();
-  // skip the local padding optimization in the case when there is no single constant expression
-  // used for initialization
+  // Skip the local padding optimization in the case when there is no single constant expression
+  // used for initialization.
   if (!init_constexpr.defined()) {
     return stmt;
   }
