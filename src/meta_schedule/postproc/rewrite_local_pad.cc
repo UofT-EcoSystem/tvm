@@ -17,7 +17,9 @@
  * under the License.
  */
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/meta_schedule/postproc.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
@@ -138,15 +140,15 @@ class PredicateInliner : public ExprMutator {
   PrimExpr VisitExpr_(const AndNode* op) final {
     if (!op->a.as<AndNode>()) {
       if (!CanInlinePredicate_(op->a)) {
-        non_inlinable_residual_ = non_inlinable_residual_.defined() ?
-                                    And(non_inlinable_residual_, op->a) : op->a;
+        non_inlinable_residual_ = is_const_int(non_inlinable_residual_, 1) ?
+                                    op->a : And(non_inlinable_residual_, op->a);
         return op->b;
       }
     }
     if (!op->b.as<AndNode>()) {
       if (!CanInlinePredicate_(op->b)) {
-        non_inlinable_residual_ = non_inlinable_residual_.defined() ?
-                                    And(non_inlinable_residual_, op->b) : op->b;
+        non_inlinable_residual_ = is_const_int(non_inlinable_residual_, 1) ?
+                                    op->b : And(non_inlinable_residual_, op->b);
         return op->a;
       }
     }
@@ -211,14 +213,31 @@ class LocalPadder : public StmtExprMutator {
     if (!enable_padding_) {
       return StmtExprMutator::VisitStmt_(op);
     }
+    if (predicate_stack_.empty()) {
+      return BufferStore(op->buffer, op->value, op->indices);
+    }
+    // In the case when local padding is made, unroll the vectorized loops.
+    unroll_vectorized_loop_ = true;
     return BufferStore(op->buffer, Select(ComposePredicate_(), op->value,
                                           ComposePaddedValue_(op->value->dtype)),
                        op->indices);
   }
+  Stmt VisitStmt_(const ForNode* op) final {
+    if (op->kind != ForKind::kVectorized) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+    unroll_vectorized_loop_ = false;
+    Stmt body = VisitStmt(op->body);
+    if (unroll_vectorized_loop_) {
+      return For(op->loop_var, op->min, op->extent, ForKind::kSerial, body, op->thread_binding,
+                 op->annotations);
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
   PrimExpr ComposePredicate_() const {
-    PrimExpr predicate = Bool(true);
-    for (PrimExpr expr : predicate_stack_) {
-      predicate = And(predicate, expr);
+    PrimExpr predicate = predicate_stack_.front();
+    for (auto iter = predicate_stack_.begin() + 1; iter != predicate_stack_.end(); ++iter) {
+      predicate = And(predicate, *iter);
     }
     return predicate;
   }
@@ -232,6 +251,7 @@ class LocalPadder : public StmtExprMutator {
   InitChecker init_checker_;
   std::vector<PrimExpr> predicate_stack_;
   bool enable_padding_ = false;
+  bool unroll_vectorized_loop_ = false;
 };
 
 }  // anonymous namespace
