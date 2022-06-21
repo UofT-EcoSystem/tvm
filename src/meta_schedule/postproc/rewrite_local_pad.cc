@@ -93,7 +93,7 @@ class InitChecker : public StmtVisitor {
     CheckInitValue_<FloatImmNode>(op->value);
     return StmtVisitor::VisitStmt_(op);
   }
-  template<typename ImmNodeType>
+  template <typename ImmNodeType>
   void CheckInitValue_(const PrimExpr& rhs) {
     if (const ImmNodeType* const rhs_val = rhs.as<ImmNodeType>()) {
       if (init_constexpr_.defined()) {
@@ -140,15 +140,15 @@ class PredicateInliner : public ExprMutator {
   PrimExpr VisitExpr_(const AndNode* op) final {
     if (!op->a.as<AndNode>()) {
       if (!CanInlinePredicate_(op->a)) {
-        non_inlinable_residual_ = is_const_int(non_inlinable_residual_, 1) ?
-                                    op->a : And(non_inlinable_residual_, op->a);
+        non_inlinable_residual_ =
+            is_const_int(non_inlinable_residual_, 1) ? op->a : And(non_inlinable_residual_, op->a);
         return op->b;
       }
     }
     if (!op->b.as<AndNode>()) {
       if (!CanInlinePredicate_(op->b)) {
-        non_inlinable_residual_ = is_const_int(non_inlinable_residual_, 1) ?
-                                    op->b : And(non_inlinable_residual_, op->b);
+        non_inlinable_residual_ =
+            is_const_int(non_inlinable_residual_, 1) ? op->b : And(non_inlinable_residual_, op->b);
         return op->a;
       }
     }
@@ -162,7 +162,7 @@ class PredicateInliner : public ExprMutator {
   }
   /*!
    * \brief Check if a predicate can be inlined. We cannot inline a predicate if it consists of
-   *        `threadIdx.*` and serial iteration variables. 
+   *        `threadIdx.*` and serial iteration variables.
    */
   bool CanInlinePredicate_(const PrimExpr& predicate) {
     predicate_inlinable_ = false;
@@ -182,8 +182,8 @@ class LocalPadder : public StmtExprMutator {
     if (StorageAccessAnalyzer()(op->block->reads).NoAccesses_() &&
         StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
       if (!NameMatchesRegexPattern(op->block->name_hint, "(.+)_init")) {
-        LOG(WARNING) << "Treating " << op->block << " as an initialization block "
-                        "as it only has local/shared memory writes";
+        LOG(WARNING) << "Treating " << op->block
+                     << " as an initialization block as it only has local/shared memory writes";
       }
       init_checker_(op->block);
       // Remove all the predicates in the initialization step.
@@ -218,9 +218,9 @@ class LocalPadder : public StmtExprMutator {
     }
     // In the case when local padding is made, unroll the vectorized loops.
     unroll_vectorized_loop_ = true;
-    return BufferStore(op->buffer, Select(ComposePredicate_(), op->value,
-                                          ComposePaddedValue_(op->value->dtype)),
-                       op->indices);
+    return BufferStore(
+        op->buffer, Select(ComposePredicate_(), op->value, ComposePaddedValue_(op->value->dtype)),
+        op->indices);
   }
   Stmt VisitStmt_(const ForNode* op) final {
     if (op->kind != ForKind::kVectorized) {
