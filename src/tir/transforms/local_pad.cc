@@ -30,6 +30,7 @@
 
 namespace tvm {
 namespace tir {
+namespace transform {
 namespace {
 
 inline bool NameMatchesRegexPattern(const String& name, const std::string& pattern) {
@@ -254,9 +255,7 @@ class LocalPadder : public StmtExprMutator {
   bool unroll_vectorized_loop_ = false;
 };
 
-}  // anonymous namespace
-
-static Stmt LocalPad(Stmt stmt) {
+Stmt LocalPadTransform(Stmt stmt) {
   // Skip the local padding optimization in the case when there is no single constant expression
   // used for initialization.
   LocalPadder local_padder;
@@ -264,12 +263,30 @@ static Stmt LocalPad(Stmt stmt) {
   return stmt;
 }
 
-namespace transform {
+struct LocalPadConfigNode : public tvm::AttrsNode<LocalPadConfigNode> {
+  bool enable_local_pad;
+
+  TVM_DECLARE_ATTRS(LocalPadConfigNode, "tir.transform.LocalPadConfig") {
+    TVM_ATTR_FIELD(enable_local_pad).describe("Enable local padding").set_default(false);
+  }
+};
+
+class LocalPadConfig : public Attrs {
+ public:
+  TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(LocalPadConfig, Attrs, LocalPadConfigNode);
+};
+
+TVM_REGISTER_NODE_TYPE(LocalPadConfigNode);
+TVM_REGISTER_PASS_CONFIG_OPTION("tir.LocalPad", LocalPadConfig);
 
 Pass LocalPad() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     PrimFuncNode* mutable_func = f.CopyOnWrite();
-    mutable_func->body = LocalPad(std::move(mutable_func->body));
+    Optional<LocalPadConfig> cfg = ctx->GetConfig<LocalPadConfig>("tir.LocalPad");
+    if (!cfg.defined()) {
+      cfg = AttrsWithDefaultValues<LocalPadConfig>();
+    }
+    mutable_func->body = LocalPadTransform(std::move(mutable_func->body));
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tir.LocalPad", {});
@@ -277,6 +294,7 @@ Pass LocalPad() {
 
 TVM_REGISTER_GLOBAL("tir.transform.LocalPad").set_body_typed(LocalPad);
 
+}  // anonymous namespace
 }  // namespace transform
 }  // namespace tir
 }  // namespace tvm
