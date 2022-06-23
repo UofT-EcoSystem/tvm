@@ -165,7 +165,7 @@ TVM_REGISTER_GLOBAL("driver.get_binds")
       return out_arr;
     });
 
-Array<tvm::transform::Pass> CreatePassList(bool disable_loop_partition) {
+Array<tvm::transform::Pass> CreatePassList(bool simple_mode) {
   transform::PassContext pass_ctx = transform::PassContext::Current();
 
   bool disable_vectorize = pass_ctx->GetConfig<Bool>("tir.disable_vectorize", Bool(false)).value();
@@ -238,7 +238,8 @@ Array<tvm::transform::Pass> CreatePassList(bool disable_loop_partition) {
   pass_list.insert(pass_list.end(), user_lower_phase1.begin(), user_lower_phase1.end());
 
   // PHASE 2
-  if (!disable_loop_partition) {
+  if (!simple_mode) {
+    pass_list.push_back(tir::transform::LocalPad());
     pass_list.push_back(tir::transform::LoopPartition());
   }
 

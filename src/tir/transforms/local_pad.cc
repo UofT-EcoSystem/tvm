@@ -279,6 +279,8 @@ class LocalPadConfig : public Attrs {
 TVM_REGISTER_NODE_TYPE(LocalPadConfigNode);
 TVM_REGISTER_PASS_CONFIG_OPTION("tir.LocalPad", LocalPadConfig);
 
+}  // anonymous namespace
+
 Pass LocalPad() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     PrimFuncNode* mutable_func = f.CopyOnWrite();
@@ -294,7 +296,6 @@ Pass LocalPad() {
 
 TVM_REGISTER_GLOBAL("tir.transform.LocalPad").set_body_typed(LocalPad);
 
-}  // anonymous namespace
 }  // namespace transform
 }  // namespace tir
 }  // namespace tvm
