@@ -279,33 +279,4 @@ TVM_REGISTER_GLOBAL("tir.transform.LocalPad").set_body_typed(LocalPad);
 
 }  // namespace transform
 }  // namespace tir
-
-namespace meta_schedule {
-namespace {
-
-class RewriteLocalPadNode : public PostprocNode {
- public:
-  void InitializeWithTuneContext(const TuneContext& context) final {}
-  bool Apply(const tir::Schedule& sch) final {
-    tir::transform::Pass local_pad_pass = tir::transform::LocalPad();
-    sch->state().get()->mod = local_pad_pass(sch->state().get()->mod);
-    return true;
-  }
-  void VisitAttrs(tvm::AttrVisitor* v) {}
-  static constexpr const char* _type_key = "meta_schedule.RewriteLocalPad";
-  TVM_DECLARE_FINAL_OBJECT_INFO(RewriteLocalPadNode, PostprocNode);
-};
-
-}  // anonymous namespace
-
-Postproc Postproc::RewriteLocalPad() {
-  ObjectPtr<RewriteLocalPadNode> n = make_object<RewriteLocalPadNode>();
-  return Postproc(n);
-}
-
-TVM_REGISTER_NODE_TYPE(RewriteLocalPadNode);
-TVM_REGISTER_GLOBAL("meta_schedule.PostprocRewriteLocalPad")
-    .set_body_typed(Postproc::RewriteLocalPad);
-
-}  // namespace meta_schedule
 }  // namespace tvm
