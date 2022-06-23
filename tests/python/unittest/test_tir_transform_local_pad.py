@@ -16,7 +16,6 @@
 # under the License.
 # pylint: disable=missing-module-docstring
 import numpy as np
-from tvm.meta_schedule.postproc import RewriteLocalPad
 from tvm.script import tir as T
 import tvm.testing
 from tvm.tir import Schedule
@@ -47,24 +46,22 @@ def sample_dense_sched(sch):  # pylint: disable=too-many-statements
     sch.compute_at(block=b35, loop=l28, preserve_unit_loops=True)
     l36, l37, l38, l39, l40, l41 = sch.get_loops(block=b35)
     l42 = sch.fuse(l40, l41)
-    v43 = 3
-    sch.annotate(block_or_loop=b35, ann_key="meta_schedule.cooperative_fetch", ann_val=v43)
+    sch.annotate(block_or_loop=b35, ann_key="meta_schedule.cooperative_fetch", ann_val=3)
     b44 = sch.cache_read(block=b0, read_buffer_index=1, storage_scope="shared")
     sch.compute_at(block=b44, loop=l28, preserve_unit_loops=True)
     l45, l46, l47, l48, l49, l50 = sch.get_loops(block=b44)
     l51 = sch.fuse(l49, l50)
-    v52 = 4
-    sch.annotate(block_or_loop=b44, ann_key="meta_schedule.cooperative_fetch", ann_val=v52)
+    sch.annotate(block_or_loop=b44, ann_key="meta_schedule.cooperative_fetch", ann_val=4)
     sch.annotate(block_or_loop=b1, ann_key="meta_schedule.unroll_explicit", ann_val=512)
     sch.enter_postproc()
     sch.unannotate(block_or_loop=b35, ann_key="meta_schedule.cooperative_fetch")
     l54, l55, l56, l57, l58 = sch.get_loops(block=b35)
-    l59, l60, l61 = sch.split(loop=l58, factors=[None, 256, v43])
+    l59, l60, l61 = sch.split(loop=l58, factors=[None, 256, 3])
     sch.vectorize(loop=l61)
     sch.bind(loop=l60, thread_axis="threadIdx.x")
     sch.unannotate(block_or_loop=b44, ann_key="meta_schedule.cooperative_fetch")
     l61, l62, l63, l64, l65 = sch.get_loops(block=b44)
-    l66, l67, l68 = sch.split(loop=l65, factors=[None, 256, v52])
+    l66, l67, l68 = sch.split(loop=l65, factors=[None, 256, 4])
     sch.vectorize(loop=l68)
     sch.bind(loop=l67, thread_axis="threadIdx.x")
     b69 = sch.get_block(name="root", func_name="main")
@@ -116,7 +113,6 @@ def test_dense_local_padding():
     y_empty = np.empty(shape=y_np.shape, dtype=y_np.dtype)
     tir_sched = Schedule(Dense_960x770x2304)
     sample_dense_sched(tir_sched)
-    RewriteLocalPad().apply(tir_sched)
     cuda_kernel = tvm.build(tir_sched.mod["main"], [], target="cuda")
     cuda_ctx = tvm.cuda()
     module_data = [x_np, w_np, y_empty]
