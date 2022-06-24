@@ -107,7 +107,6 @@ TVM_DLL Pass CoProcSync();
  */
 TVM_DLL Pass LiftAttrScope(String attr_key);
 
-
 /*!
  * \brief Pad tensors according to the local workspace size. This is to remove predicates at the
  *        compute body that could negatively affect the performance.
