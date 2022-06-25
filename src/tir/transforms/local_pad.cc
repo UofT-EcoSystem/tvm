@@ -17,14 +17,12 @@
  * under the License.
  */
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/meta_schedule/postproc.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include <regex>
 #include <utility>
 #include <vector>
 
@@ -32,10 +30,6 @@ namespace tvm {
 namespace tir {
 namespace transform {
 namespace {
-
-inline bool NameMatchesRegexPattern(const String& name, const std::string& pattern) {
-  return std::regex_match(std::string(name), std::regex("^" + pattern + "$"));
-}
 
 /*!
  * \brief Analyze the read and write accesses of the body statements, used by `LocalPadder`.
@@ -147,55 +141,56 @@ class InitChecker : public StmtVisitor {
  *        Note that not all predicates can be inlined. For example, if a predicate is there to guard
  *        against out-of-boundary accesses to local/shared variables, then it cannot be inlined.
  */
-class PredicateInliner : public ExprMutator {
+class PredicateInliner : public StmtExprVisitor {
  private:
-  PrimExpr VisitExpr_(const AndNode* op) final {
-    if (!op->a.as<AndNode>()) {
-      if (!CanInlinePredicate_(op->a)) {
-        non_inlinable_residual_ =
-            is_const_int(non_inlinable_residual_, 1) ? op->a : And(non_inlinable_residual_, op->a);
-        return op->b;
-      }
-    }
-    if (!op->b.as<AndNode>()) {
-      if (!CanInlinePredicate_(op->b)) {
-        non_inlinable_residual_ =
-            is_const_int(non_inlinable_residual_, 1) ? op->b : And(non_inlinable_residual_, op->b);
-        return op->a;
-      }
-    }
-    return ExprMutator::VisitExpr_(op);
+  explicit PredicateInliner(const Stmt& body_stmt) : body_stmt_(body_stmt) {}
+
+#define VISIT_PREDICATE(OpType)                      \
+  void VisitExpr_(const OpType##Node* op) final {    \
+    OpType predicate = GetRef<OpType>(op);           \
+    if (CanInlinePredicate_<OpType##Node>(op)) {     \
+      inlinable_predicates_.push_back(predicate);    \
+    } else {                                         \
+      non_inlinable_residuals_.push_back(predicate); \
+    }                                                \
   }
-  PrimExpr VisitExpr_(const VarNode* op) final {
-    if (!NameMatchesRegexPattern(op->name_hint, "((ax\\d_)+)fused_(\\d+)")) {
-      predicate_inlinable_ = true;
+  VISIT_PREDICATE(LT)
+  VISIT_PREDICATE(LE)
+  VISIT_PREDICATE(GT)
+  VISIT_PREDICATE(GE)
+#undef VISIT_PREDICATE
+
+  void VisitStmt_(const BufferStoreNode* op) final {
+    if (op->indices.size() != 1) {
+      return StmtVisitor::VisitStmt_(op);
     }
-    return ExprMutator::VisitExpr_(op);
+    CHECK(op->buffer.scope() == "shared" || op->buffer.scope() == "local");
+    if (StructuralEqual()(op->indices[0], predicate_lhs_)) {
+      predicate_inlinable_ = false;
+    }
+    return StmtVisitor::VisitStmt_(op);
   }
   /*!
-   * \brief Check if a predicate can be inlined. We cannot inline a predicate if it consists of
-   *        `threadIdx.*` and serial iteration variables.
+   * \brief Check if a predicate can be inlined.
    */
-  bool CanInlinePredicate_(const PrimExpr& predicate) {
-    predicate_inlinable_ = false;
-    VisitExpr(predicate);
+  template <typename OpNodeType>
+  bool CanInlinePredicate_(const OpNodeType* op) {
+    predicate_inlinable_ = true;
+    predicate_lhs_ = op->a;
+    VisitStmt(body_stmt_);
     return predicate_inlinable_;
   }
 
-  PrimExpr non_inlinable_residual_ = Bool(true);
-  bool predicate_inlinable_ = false;
+  Stmt body_stmt_;
+  std::vector<PrimExpr> inlinable_predicates_, non_inlinable_residuals_;
+  bool predicate_inlinable_;
+  PrimExpr predicate_lhs_;
 
   friend class LocalPadder;
 };
 
 class LocalPadder : public StmtExprMutator {
  private:
-
-  Stmt VisitStmt(const Stmt& stmt) final {
-    LOG(INFO) << "Visiting stmt=" << stmt;
-    return StmtExprMutator::VisitStmt(stmt);
-  }
-
   Stmt VisitStmt_(const IfThenElseNode* op) final {
     if (op->else_case.defined()) {
       return StmtExprMutator::VisitStmt_(op);
@@ -205,8 +200,8 @@ class LocalPadder : public StmtExprMutator {
     std::tie(read_marker, write_marker) = StorageAccessAnalyzer().Analyze_(op->then_case);
 
     if (read_marker.NoAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
-      // In the case when there are no buffer reads and only local/shared buffer writes, obtain
-      // their initialization values.
+      // In the case when there are no buffer reads and only local/shared buffer writes, remove the
+      // predicates and obtain the buffer initialization values.
       init_checker_(op->then_case);
       if (!init_checker_.init_constexpr_.defined()) {
         return StmtExprMutator::VisitStmt_(op);
@@ -215,75 +210,46 @@ class LocalPadder : public StmtExprMutator {
     } else if (read_marker.OnlyGlobalAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
       // In the case when there are global buffer reads and local/shared buffer writes, inline the
       // predicates as part of the buffer store statements.
-      PredicateInliner predicate_inliner;
-      predicate_stack_.push_back(predicate_inliner(op->condition));
-      enable_padding_ = true;
-      Stmt body_stmt = VisitStmt(op->then_case);
-      enable_padding_ = false;
-      predicate_stack_.pop_back();
-      return IfThenElse(predicate_inliner.non_inlinable_residual_, body_stmt, Stmt());
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
+      PredicateInliner predicate_inliner(op->then_case);
+      predicate_inliner(op->condition);
+      size_t predicate_stack_current_size = predicate_stack_.size();
+      // Push the inlinable predicates on top of the stack.
+      if (!predicate_inliner.inlinable_predicates_.empty()) {
+        predicate_stack_.insert(predicate_stack_.end(),
+                                predicate_inliner.inlinable_predicates_.begin(),
+                                predicate_inliner.inlinable_predicates_.end());
+      }
 
-  // Stmt VisitStmt_(const BlockRealizeNode* op) final {
-  //   if (StorageAccessAnalyzer()(op->block->reads).NoAccesses_() &&
-  //       StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
-  //     init_checker_(op->block);
-  //     // Remove all the predicates in the initialization step.
-  //     return BlockRealize(op->iter_values, Bool(true),
-  //                         Downcast<Block>(StmtExprMutator::VisitStmt(op->block)));
-  //   } else if (StorageAccessAnalyzer()(op->block->reads).OnlyGlobalAccesses_() &&
-  //              StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
-  //     if (!init_checker_.init_constexpr_.defined()) {
-  //       return StmtExprMutator::VisitStmt_(op);
-  //     }
-  //     PredicateInliner predicate_inliner;
-  //     predicate_stack_.push_back(predicate_inliner(op->predicate));
-  //     enable_padding_ = true;
-  //     Block op_block = Downcast<Block>(VisitStmt(op->block));
-  //     enable_padding_ = false;
-  //     predicate_stack_.pop_back();
-  //     return BlockRealize(op->iter_values, predicate_inliner.non_inlinable_residual_, op_block);
-  //   } else if (StorageAccessAnalyzer()(op->block->reads).OnlyLocalOrSharedAccesses_() &&
-  //              StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
-  //     // Remove all the predicates in the compute step.
-  //     return BlockRealize(op->iter_values, Bool(true),
-  //                         Downcast<Block>(StmtExprMutator::VisitStmt(op->block)));
-  //   }
-  //   return StmtMutator::VisitStmt_(op);
-  // }
-  Stmt VisitStmt_(const BufferStoreNode* op) final {
-    if (!enable_padding_) {
-      return StmtExprMutator::VisitStmt_(op);
-    }
-    if (predicate_stack_.empty()) {
-      return BufferStore(op->buffer, op->value, op->indices);
-    }
-    // In the case when local padding is made, unroll the vectorized loops.
-    unroll_vectorized_loop_ = true;
-    return BufferStore(
-        op->buffer, Select(ComposePredicate_(), op->value, ComposePaddedValue_(op->value->dtype)),
-        op->indices);
-  }
-  Stmt VisitStmt_(const ForNode* op) final {
-    if (op->kind != ForKind::kVectorized) {
-      return StmtExprMutator::VisitStmt_(op);
-    }
-    unroll_vectorized_loop_ = false;
-    Stmt body = VisitStmt(op->body);
-    if (unroll_vectorized_loop_) {
-      return For(op->loop_var, op->min, op->extent, ForKind::kSerial, body, op->thread_binding,
-                 op->annotations);
+      enable_padding_ = true;
+      // Update the body statements by inlining the predicates.
+      Stmt inlined_body_stmt = VisitStmt(op->then_case);
+      enable_padding_ = false;
+
+      if (!predicate_inliner.inlinable_predicates_.empty()) {
+        predicate_stack_.erase(predicate_stack_.begin() + predicate_stack_current_size,
+                               predicate_stack_.end());
+      }
+      if (predicate_inliner.non_inlinable_residuals_.empty()) {
+        return inlined_body_stmt;
+      }
+      return IfThenElse(FlattenPredicates_(predicate_inliner.non_inlinable_residuals_),
+                        inlined_body_stmt);
+    } else if (read_marker.OnlyLocalOrSharedAccesses() &&
+               write_marker.OnlyLocalOrSharedAccesses()) {
+      // In the case when there are global buffer reads and local/shared buffer writes, inline the
+      // predicates as part of the buffer store statements.
+      return StmtExprMutator::VisitStmt(op->then_case);
     }
     return StmtExprMutator::VisitStmt_(op);
   }
-  PrimExpr ComposePredicate_() const {
-    PrimExpr predicate = predicate_stack_.front();
-    for (auto iter = predicate_stack_.begin() + 1; iter != predicate_stack_.end(); ++iter) {
-      predicate = And(predicate, *iter);
+  Stmt VisitStmt_(const BufferStoreNode* op) final {
+    if (!enable_padding_ || predicate_stack_.empty()) {
+      return StmtExprMutator::VisitStmt_(op);
     }
-    return predicate;
+    PrimExpr store_predicate = FlattenPredicates_(predicate_stack_);
+    return BufferStore(op->buffer,
+                       Select(store_predicate, op->value, ComposePaddedValue_(op->value->dtype)),
+                       op->indices);
   }
   PrimExpr ComposePaddedValue_(const DataType& dtype) const {
     if (init_checker_.init_constexpr_->dtype != dtype) {
@@ -291,11 +257,19 @@ class LocalPadder : public StmtExprMutator {
     }
     return init_checker_.init_constexpr_;
   }
+  PrimExpr FlattenPredicates_(const Array<PrimExpr>& predicates) const {
+    CHECK(!predicates.empty());
+    PrimExpr ret = predicates.front();
+    for (auto predicates_it = predicates.begin() + 1; predicates_it != predicates.end();
+         ++predicates_it) {
+      ret = ret && (*predicates_it);
+    }
+    return ret;
+  }
 
   InitChecker init_checker_;
   std::vector<PrimExpr> predicate_stack_;
   bool enable_padding_ = false;
-  bool unroll_vectorized_loop_ = false;
 };
 
 Stmt LocalPadTransform(Stmt stmt) {
@@ -326,12 +300,12 @@ TVM_REGISTER_PASS_CONFIG_OPTION("tir.LocalPad", LocalPadConfig);
 
 Pass LocalPad() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    PrimFuncNode* mutable_func = f.CopyOnWrite();
+    PrimFuncNode* mutable_func_node = f.CopyOnWrite();
     Optional<LocalPadConfig> cfg = ctx->GetConfig<LocalPadConfig>("tir.LocalPad");
     if (!cfg.defined()) {
       cfg = AttrsWithDefaultValues<LocalPadConfig>();
     }
-    mutable_func->body = LocalPadTransform(std::move(mutable_func->body));
+    mutable_func_node->body = LocalPadTransform(std::move(mutable_func_node->body));
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tir.LocalPad", {});
