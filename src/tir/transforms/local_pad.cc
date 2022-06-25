@@ -40,43 +40,54 @@ inline bool NameMatchesRegexPattern(const String& name, const std::string& patte
 /*!
  * \brief Analyze the read and write accesses of the body statements, used by `LocalPadder`.
  */
-class StorageAccessAnalyzer {
+class StorageAccessAnalyzer : private StmtExprVisitor {
  private:
   struct StorageType {
     enum { kGlobal = 0, kShared, kLocal, kOthers };
   };
 
-  const StorageAccessAnalyzer& operator()(const Array<BufferRegion>& buffer_regions) {
-    access_marker_ = std::vector<bool>(StorageType::kOthers + 1, false);
-    for (const BufferRegion& buffer_region : buffer_regions) {
-      SetStorageAccessMarker_(buffer_region->buffer);
+  void VisitStmt_(const BufferStoreNode* op) final {
+    write_marker_.SetStorageAccessMarker_(op->buffer);
+    StmtExprVisitor::VisitStmt_(op);
+  }
+  void VisitExpr_(const BufferLoadNode* op) final {
+    read_marker_.SetStorageAccessMarker_(op->buffer);
+    StmtExprVisitor::VisitExpr_(op);
+  }
+  class AccessMarker {
+   public:
+    void SetStorageAccessMarker_(const Buffer& buf) {
+      if (buf.scope() == "global") {
+        bit_vector_[StorageType::kGlobal] = true;
+      } else if (buf.scope() == "shared") {
+        bit_vector_[StorageType::kShared] = true;
+      } else if (buf.scope() == "local") {
+        bit_vector_[StorageType::kLocal] = true;
+      } else {
+        bit_vector_[StorageType::kOthers] = true;
+      }
     }
-    return *this;
-  }
-  std::vector<bool> access_marker_;
-  void SetStorageAccessMarker_(const Buffer& buf) {
-    if (buf.scope() == "global") {
-      access_marker_[StorageType::kGlobal] = true;
-    } else if (buf.scope() == "shared") {
-      access_marker_[StorageType::kShared] = true;
-    } else if (buf.scope() == "local") {
-      access_marker_[StorageType::kLocal] = true;
-    } else {
-      access_marker_[StorageType::kOthers] = true;
+    bool NoAccesses() const {
+      return !(bit_vector_[StorageType::kGlobal] || bit_vector_[StorageType::kShared] ||
+               bit_vector_[StorageType::kLocal] || bit_vector_[StorageType::kOthers]);
     }
-  }
-  bool NoAccesses_() const {
-    return !(access_marker_[StorageType::kGlobal] || access_marker_[StorageType::kShared] ||
-             access_marker_[StorageType::kLocal] || access_marker_[StorageType::kOthers]);
-  }
-  bool OnlyGlobalAccesses_() const {
-    return !(access_marker_[StorageType::kShared] || access_marker_[StorageType::kLocal] ||
-             access_marker_[StorageType::kOthers]) &&
-           access_marker_[StorageType::kGlobal];
-  }
-  bool OnlyLocalOrSharedAccesses_() const {
-    return !(access_marker_[StorageType::kGlobal] || access_marker_[StorageType::kOthers]) &&
-           (access_marker_[StorageType::kShared] || access_marker_[StorageType::kLocal]);
+    bool OnlyGlobalAccesses() const {
+      return !(bit_vector_[StorageType::kShared] || bit_vector_[StorageType::kLocal] ||
+               bit_vector_[StorageType::kOthers]) &&
+             bit_vector_[StorageType::kGlobal];
+    }
+    bool OnlyLocalOrSharedAccesses() const {
+      return !(bit_vector_[StorageType::kGlobal] || bit_vector_[StorageType::kOthers]) &&
+             (bit_vector_[StorageType::kShared] || bit_vector_[StorageType::kLocal]);
+    }
+
+   private:
+    std::array<bool, StorageType::kOthers + 1> bit_vector_ = {false};
+  };
+  AccessMarker read_marker_, write_marker_;
+  std::pair<AccessMarker, AccessMarker> Analyze_(const Stmt& stmt) {
+    VisitStmt(stmt);
+    return std::make_pair(read_marker_, write_marker_);
   }
 
   friend class LocalPadder;
@@ -133,8 +144,8 @@ class InitChecker : public StmtVisitor {
  *            ↓
  *            A = predicate ? ... : init_constexpr;
  *
- *        Note that not all predicates can be inlined. E.g., `threadIdx.x < 120` cannot be inlined,
- *        since doing so could lead to invalid memory accesses.
+ *        Note that not all predicates can be inlined. For example, if a predicate is there to guard
+ *        against out-of-boundary accesses to local/shared variables, then it cannot be inlined.
  */
 class PredicateInliner : public ExprMutator {
  private:
@@ -179,37 +190,69 @@ class PredicateInliner : public ExprMutator {
 
 class LocalPadder : public StmtExprMutator {
  private:
-  Stmt VisitStmt_(const BlockRealizeNode* op) final {
-    if (StorageAccessAnalyzer()(op->block->reads).NoAccesses_() &&
-        StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
-      if (!NameMatchesRegexPattern(op->block->name_hint, "(.+)_init")) {
-        LOG(WARNING) << "Treating " << op->block
-                     << " as an initialization block as it only has local/shared memory writes";
-      }
-      init_checker_(op->block);
-      // Remove all the predicates in the initialization step.
-      return BlockRealize(op->iter_values, Bool(true),
-                          Downcast<Block>(StmtExprMutator::VisitStmt(op->block)));
-    } else if (StorageAccessAnalyzer()(op->block->reads).OnlyGlobalAccesses_() &&
-               StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
+
+  Stmt VisitStmt(const Stmt& stmt) final {
+    LOG(INFO) << "Visiting stmt=" << stmt;
+    return StmtExprMutator::VisitStmt(stmt);
+  }
+
+  Stmt VisitStmt_(const IfThenElseNode* op) final {
+    if (op->else_case.defined()) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+    // Analyze the reads and writes of the body statements.
+    StorageAccessAnalyzer::AccessMarker read_marker, write_marker;
+    std::tie(read_marker, write_marker) = StorageAccessAnalyzer().Analyze_(op->then_case);
+
+    if (read_marker.NoAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
+      // In the case when there are no buffer reads and only local/shared buffer writes, obtain
+      // their initialization values.
+      init_checker_(op->then_case);
       if (!init_checker_.init_constexpr_.defined()) {
         return StmtExprMutator::VisitStmt_(op);
       }
+      return StmtExprMutator::VisitStmt(op->then_case);
+    } else if (read_marker.OnlyGlobalAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
+      // In the case when there are global buffer reads and local/shared buffer writes, inline the
+      // predicates as part of the buffer store statements.
       PredicateInliner predicate_inliner;
-      predicate_stack_.push_back(predicate_inliner(op->predicate));
+      predicate_stack_.push_back(predicate_inliner(op->condition));
       enable_padding_ = true;
-      Block op_block = Downcast<Block>(VisitStmt(op->block));
+      Stmt body_stmt = VisitStmt(op->then_case);
       enable_padding_ = false;
       predicate_stack_.pop_back();
-      return BlockRealize(op->iter_values, predicate_inliner.non_inlinable_residual_, op_block);
-    } else if (StorageAccessAnalyzer()(op->block->reads).OnlyLocalOrSharedAccesses_() &&
-               StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
-      // Remove all the predicates in the compute step.
-      return BlockRealize(op->iter_values, Bool(true),
-                          Downcast<Block>(StmtExprMutator::VisitStmt(op->block)));
+      return IfThenElse(predicate_inliner.non_inlinable_residual_, body_stmt, Stmt());
     }
-    return StmtMutator::VisitStmt_(op);
+    return StmtExprMutator::VisitStmt_(op);
   }
+
+  // Stmt VisitStmt_(const BlockRealizeNode* op) final {
+  //   if (StorageAccessAnalyzer()(op->block->reads).NoAccesses_() &&
+  //       StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
+  //     init_checker_(op->block);
+  //     // Remove all the predicates in the initialization step.
+  //     return BlockRealize(op->iter_values, Bool(true),
+  //                         Downcast<Block>(StmtExprMutator::VisitStmt(op->block)));
+  //   } else if (StorageAccessAnalyzer()(op->block->reads).OnlyGlobalAccesses_() &&
+  //              StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
+  //     if (!init_checker_.init_constexpr_.defined()) {
+  //       return StmtExprMutator::VisitStmt_(op);
+  //     }
+  //     PredicateInliner predicate_inliner;
+  //     predicate_stack_.push_back(predicate_inliner(op->predicate));
+  //     enable_padding_ = true;
+  //     Block op_block = Downcast<Block>(VisitStmt(op->block));
+  //     enable_padding_ = false;
+  //     predicate_stack_.pop_back();
+  //     return BlockRealize(op->iter_values, predicate_inliner.non_inlinable_residual_, op_block);
+  //   } else if (StorageAccessAnalyzer()(op->block->reads).OnlyLocalOrSharedAccesses_() &&
+  //              StorageAccessAnalyzer()(op->block->writes).OnlyLocalOrSharedAccesses_()) {
+  //     // Remove all the predicates in the compute step.
+  //     return BlockRealize(op->iter_values, Bool(true),
+  //                         Downcast<Block>(StmtExprMutator::VisitStmt(op->block)));
+  //   }
+  //   return StmtMutator::VisitStmt_(op);
+  // }
   Stmt VisitStmt_(const BufferStoreNode* op) final {
     if (!enable_padding_) {
       return StmtExprMutator::VisitStmt_(op);
@@ -264,10 +307,10 @@ Stmt LocalPadTransform(Stmt stmt) {
 }
 
 struct LocalPadConfigNode : public tvm::AttrsNode<LocalPadConfigNode> {
-  bool enable_local_pad;
+  bool enable;
 
   TVM_DECLARE_ATTRS(LocalPadConfigNode, "tir.transform.LocalPadConfig") {
-    TVM_ATTR_FIELD(enable_local_pad).describe("Enable local padding").set_default(false);
+    TVM_ATTR_FIELD(enable).describe("Enable local padding").set_default(false);
   }
 };
 
