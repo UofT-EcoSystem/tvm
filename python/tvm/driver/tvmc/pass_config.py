@@ -112,7 +112,7 @@ def get_pass_config_value(name, value, config_type):
                     raise TVMCException(f"Only integer is allow for configuration '{name}'.")
 
                 # TODO (@leeexyz) We should parse configurations of each tir Pass.
-                #     For now, we only use the defaults. Currently, There are five config nodes:
+                #     For now, we only use the defaults. Currently, There are four config nodes:
                 #     `tir.transform.LoopPartitionConfig`
                 #     `tir.transform.UnrollLoopConfig`
                 #     `tir.transform.HoistIfThenElseConfig`
