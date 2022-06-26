@@ -43,6 +43,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION("tir.noalias", Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION("tir.detect_global_barrier", Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION("tir.instrument_bound_checkers", Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION("tir.disable_assert", Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tir.enable_local_pad", Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION("tir.disable_vectorize", Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION("tir.disable_cse_tir", Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION("tir.enable_equiv_terms_in_cse_tir", Bool);
@@ -168,6 +169,7 @@ TVM_REGISTER_GLOBAL("driver.get_binds")
 Array<tvm::transform::Pass> CreatePassList(bool simple_mode) {
   transform::PassContext pass_ctx = transform::PassContext::Current();
 
+  bool enable_local_pad = pass_ctx->GetConfig<Bool>("tir.enable_local_pad", Bool(false)).value();
   bool disable_vectorize = pass_ctx->GetConfig<Bool>("tir.disable_vectorize", Bool(false)).value();
   bool disable_storage_rewrite =
       pass_ctx->GetConfig<Bool>("tir.disable_storage_rewrite", Bool(false)).value();
@@ -239,11 +241,11 @@ Array<tvm::transform::Pass> CreatePassList(bool simple_mode) {
 
   // PHASE 2
   if (!simple_mode) {
-    pass_list.push_back(tir::transform::LocalPad());
+    pass_list.push_back(tir::transform::LocalPad(enable_local_pad));
     pass_list.push_back(tir::transform::LoopPartition());
   }
 
-  pass_list.push_back(tir::transform::VectorizeLoop(!disable_vectorize));
+  pass_list.push_back(tir::transform::VectorizeLoop(!disable_vectorize, enable_local_pad));
   pass_list.push_back(tir::transform::InjectVirtualThread());
   pass_list.push_back(tir::transform::InjectDoubleBuffer());
   if (!disable_storage_rewrite) {

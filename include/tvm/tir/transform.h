@@ -111,9 +111,11 @@ TVM_DLL Pass LiftAttrScope(String attr_key);
  * \brief Pad tensors according to the local workspace size. This is to remove predicates at the
  *        compute body that could negatively affect the performance.
  *
+ * \param enable_local_pad  Whether local padding is enabled.
+ *
  * \return The pass.
  */
-TVM_DLL Pass LocalPad();
+TVM_DLL Pass LocalPad(const bool enable_local_pad = false);
 
 /*!
  * \brief partition loops in the stmt.
@@ -125,11 +127,13 @@ TVM_DLL Pass LoopPartition();
 /*!
  * \brief Lower vectorization loops.
  *
- * \param enable_vectorize Whether vectorization is enabled.
+ * \param enable_vectorize  Whether vectorization is enabled.
+ * \param enable_local_pad  Whether local padding is enabled. Local padding can affect
+ *                          how vectorization is made.
  *
  * \return The pass.
  */
-TVM_DLL Pass VectorizeLoop(bool enable_vectorize = true);
+TVM_DLL Pass VectorizeLoop(const bool enable_vectorize = true, const bool enable_local_pad = false);
 
 /*!
  * \brief Inject virtual thread loops.

@@ -192,7 +192,7 @@ class PredicateInliner : public StmtExprVisitor {
 class LocalPadder : public StmtExprMutator {
  private:
   Stmt VisitStmt_(const IfThenElseNode* op) final {
-    if (op->else_case.defined()) {
+    if (!is_no_op(op->else_case)) {
       return StmtExprMutator::VisitStmt_(op);
     }
     // Analyze the reads and writes of the body statements.
@@ -280,31 +280,14 @@ Stmt LocalPadTransform(Stmt stmt) {
   return stmt;
 }
 
-struct LocalPadConfigNode : public tvm::AttrsNode<LocalPadConfigNode> {
-  bool enable;
-
-  TVM_DECLARE_ATTRS(LocalPadConfigNode, "tir.transform.LocalPadConfig") {
-    TVM_ATTR_FIELD(enable).describe("Enable local padding").set_default(false);
-  }
-};
-
-class LocalPadConfig : public Attrs {
- public:
-  TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(LocalPadConfig, Attrs, LocalPadConfigNode);
-};
-
-TVM_REGISTER_NODE_TYPE(LocalPadConfigNode);
-TVM_REGISTER_PASS_CONFIG_OPTION("tir.LocalPad", LocalPadConfig);
-
 }  // anonymous namespace
 
-Pass LocalPad() {
+Pass LocalPad(const bool enable_local_pad) {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    PrimFuncNode* mutable_func_node = f.CopyOnWrite();
-    Optional<LocalPadConfig> cfg = ctx->GetConfig<LocalPadConfig>("tir.LocalPad");
-    if (!cfg.defined()) {
-      cfg = AttrsWithDefaultValues<LocalPadConfig>();
+    if (!enable_local_pad) {
+      return f;
     }
+    PrimFuncNode* mutable_func_node = f.CopyOnWrite();
     mutable_func_node->body = LocalPadTransform(std::move(mutable_func_node->body));
     return f;
   };

@@ -113,7 +113,6 @@ def get_pass_config_value(name, value, config_type):
 
                 # TODO (@leeexyz) We should parse configurations of each tir Pass.
                 #     For now, we only use the defaults. Currently, There are five config nodes:
-                #     `tir.transform.LocalPadConfig`
                 #     `tir.transform.LoopPartitionConfig`
                 #     `tir.transform.UnrollLoopConfig`
                 #     `tir.transform.HoistIfThenElseConfig`
