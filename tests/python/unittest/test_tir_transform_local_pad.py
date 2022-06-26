@@ -85,10 +85,11 @@ def sample_dense_sched(sch):  # pylint: disable=too-many-statements
     # pylint: enable=unused-variable, invalid-name. too-many-locals, too-many-statements
 
 
-# The workload is deliberately selected so that it does not fit into the above schedule.
 @T.prim_func
 def Dense_960x770x2304(a: T.handle, b: T.handle, c: T.handle) -> None:
     # pylint: disable=invalid-name, no-member, missing-function-docstring
+    #
+    # The workload is deliberately selected so that it does not fit into the sample schedule.
     A = T.match_buffer(a, [960, 770])
     B = T.match_buffer(b, [770, 2304])
     C = T.match_buffer(c, [960, 2304])
@@ -113,7 +114,48 @@ def test_dense_local_padding():
     y_empty = np.empty(shape=y_np.shape, dtype=y_np.dtype)
     tir_sched = Schedule(Dense_960x770x2304)
     sample_dense_sched(tir_sched)
-    cuda_kernel = tvm.build(tir_sched.mod["main"], [], target="cuda")
+    with tvm.transform.PassContext(config={"tir.enable_local_pad": True}):
+        cuda_kernel = tvm.build(tir_sched.mod["main"], [], target="cuda")
+    cuda_ctx = tvm.cuda()
+    module_data = [x_np, w_np, y_empty]
+    module_data = [tvm.nd.array(d, device=cuda_ctx) for d in module_data]
+    cuda_kernel(*module_data)
+    np.testing.assert_allclose(module_data[-1].numpy(), y_np, atol=1e-3, rtol=1e-3)
+
+
+@T.prim_func
+def Dense_100x770x2304(a: T.handle, b: T.handle, c: T.handle) -> None:
+    # pylint: disable=invalid-name, no-member, missing-function-docstring
+    #
+    # The workload is deliberately selected so that it does not fit into the sample schedule.
+    # Furthermore, it is also used to test corner cases when the loop extents are smaller than the
+    # tile sizes specified by the schedule.
+    A = T.match_buffer(a, [100, 770])
+    B = T.match_buffer(b, [770, 2304])
+    C = T.match_buffer(c, [100, 2304])
+    for i, j, k in T.grid(100, 2304, 770):
+        with T.block("update"):
+            vi, vj, vk = T.axis.remap("SSR", [i, j, k])
+            with T.init():
+                C[vi, vj] = 0.0
+            C[vi, vj] = C[vi, vj] + A[vi, vk] * B[vk, vj]
+    # pylint: enable=invalid-name, no-member, missing-function-docstring
+
+
+@tvm.testing.requires_gpu
+@tvm.testing.requires_cuda
+def test_dense_local_padding_extent_lt_tile_size():
+    """
+    Test that local padding is delivering the correct compute outcome.
+    """
+    x_np = np.random.uniform(-0.1, 0.1, size=(100, 770)).astype(np.float32)
+    w_np = np.random.uniform(-0.1, 0.1, size=(770, 2304)).astype(np.float32)
+    y_np = np.matmul(x_np, w_np)
+    y_empty = np.empty(shape=y_np.shape, dtype=y_np.dtype)
+    tir_sched = Schedule(Dense_100x770x2304)
+    sample_dense_sched(tir_sched)
+    with tvm.transform.PassContext(config={"tir.enable_local_pad": True}):
+        cuda_kernel = tvm.build(tir_sched.mod["main"], [], target="cuda")
     cuda_ctx = tvm.cuda()
     module_data = [x_np, w_np, y_empty]
     module_data = [tvm.nd.array(d, device=cuda_ctx) for d in module_data]
@@ -123,3 +165,4 @@ def test_dense_local_padding():
 
 if __name__ == "__main__":
     test_dense_local_padding()
+    test_dense_local_padding_extent_lt_tile_size()
