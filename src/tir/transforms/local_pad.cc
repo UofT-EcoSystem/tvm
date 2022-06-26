@@ -23,6 +23,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <array>
 #include <utility>
 #include <vector>
 
@@ -34,7 +35,7 @@ namespace {
 /*!
  * \brief Analyze the read and write accesses of the body statements, used by `LocalPadder`.
  */
-class StorageAccessAnalyzer : private StmtExprVisitor {
+class StorageAccessAnalyzer : public StmtExprVisitor {
  private:
   struct StorageType {
     enum { kGlobal = 0, kShared, kLocal, kOthers };
