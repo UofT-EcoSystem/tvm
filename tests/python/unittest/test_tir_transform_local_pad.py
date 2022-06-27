@@ -129,7 +129,7 @@ def Dense_100x770x2304(a: T.handle, b: T.handle, c: T.handle) -> None:
     #
     # The workload is deliberately selected so that it does not fit into the sample schedule.
     # Furthermore, it is also used to test corner cases when the loop extents are smaller than the
-    # tile sizes specified by the schedule.
+    # tile sizes specified by the schedule (i.e., 100 < 128).
     A = T.match_buffer(a, [100, 770])
     B = T.match_buffer(b, [770, 2304])
     C = T.match_buffer(c, [100, 2304])
