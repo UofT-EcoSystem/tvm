@@ -172,7 +172,7 @@ def LoopPartition():
     return _ffi_api.LoopPartition()  # type: ignore
 
 
-def VectorizeLoop(enable_vectorize: bool = True):
+def VectorizeLoop(enable_vectorize: bool = True, enable_local_pad: bool = False):
     """Lower vectorization loops.
 
     Parameters
@@ -186,7 +186,7 @@ def VectorizeLoop(enable_vectorize: bool = True):
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.VectorizeLoop(enable_vectorize)  # type: ignore
+    return _ffi_api.VectorizeLoop(enable_vectorize, enable_local_pad)  # type: ignore
 
 
 def InjectVirtualThread():
