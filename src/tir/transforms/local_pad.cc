@@ -26,10 +26,11 @@
 #include <utility>
 #include <vector>
 
+#include "../../runtime/thread_storage_scope.h"
+
 namespace tvm {
 namespace tir {
 namespace transform {
-namespace {
 
 /*!
  * \brief Analyze the read and write accesses of the body statements, used by `LocalPadder`.
@@ -49,11 +50,13 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
   class AccessMarker {
    public:
     void SetStorageAccessMarker_(const Buffer& buf) {
-      if (buf.scope() == "global") {
+      using runtime::StorageScope;
+
+      if (StorageScope::Create(buf.scope()) == StorageScope::Create("global")) {
         bit_vector_[static_cast<int>(StorageType::kGlobal)] = true;
-      } else if (buf.scope() == "shared") {
+      } else if (StorageScope::Create(buf.scope()) == StorageScope::Create("shared")) {
         bit_vector_[static_cast<int>(StorageType::kShared)] = true;
-      } else if (buf.scope() == "local") {
+      } else if (StorageScope::Create(buf.scope()) == StorageScope::Create("local")) {
         bit_vector_[static_cast<int>(StorageType::kLocal)] = true;
       } else {
         bit_vector_[static_cast<int>(StorageType::kOthers)] = true;
@@ -98,12 +101,12 @@ class InitChecker : public StmtVisitor {
   void VisitStmt_(const BufferStoreNode* op) final {
     // Read the check the RHS values, make sure that they are the same constant for all the
     // initialization statements.
-    CheckInitValue_<IntImmNode>(op->value);
-    CheckInitValue_<FloatImmNode>(op->value);
+    CheckInitValue<IntImmNode>(op->value);
+    CheckInitValue<FloatImmNode>(op->value);
     return StmtVisitor::VisitStmt_(op);
   }
   template <typename ImmNodeType>
-  void CheckInitValue_(const PrimExpr& rhs) {
+  void CheckInitValue(const PrimExpr& rhs) {
     if (const ImmNodeType* const rhs_val = rhs.as<ImmNodeType>()) {
       if (init_constexpr_.defined()) {
         if (const ImmNodeType* const init_val = init_constexpr_.as<ImmNodeType>()) {
@@ -138,7 +141,7 @@ class InitChecker : public StmtVisitor {
  *        We refer to "inlinable predicate" as
  *
  *            if (predicate) A = ...;
- *            ↓
+ *            |
  *            A = predicate ? ... : init_constexpr;
  *
  *        Note that not all predicates can be inlined. For example, if a predicate is there to guard
@@ -283,7 +286,7 @@ Stmt LocalPadTransform(Stmt stmt) {
   return stmt;
 }
 
-}  // anonymous namespace
+}  // namespace transform
 
 Pass LocalPad(const bool enable_local_pad) {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
@@ -299,6 +302,6 @@ Pass LocalPad(const bool enable_local_pad) {
 
 TVM_REGISTER_GLOBAL("tir.transform.LocalPad").set_body_typed(LocalPad);
 
-}  // namespace transform
 }  // namespace tir
+}  // namespace tvm
 }  // namespace tvm
