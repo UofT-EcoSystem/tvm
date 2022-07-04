@@ -17,7 +17,6 @@
  * under the License.
  */
 
-#include <tvm/meta_schedule/postproc.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt.h>
 #include <tvm/tir/stmt_functor.h>
@@ -37,9 +36,7 @@ namespace {
  */
 class StorageAccessAnalyzer : public StmtExprVisitor {
  private:
-  struct StorageType {
-    enum { kGlobal = 0, kShared, kLocal, kOthers };
-  };
+  enum class StorageType : int32_t { kGlobal = 0, kShared = 1, kLocal = 2, kOthers = 3 };
 
   void VisitStmt_(const BufferStoreNode* op) final {
     write_marker_.SetStorageAccessMarker_(op->buffer);
@@ -53,31 +50,36 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
    public:
     void SetStorageAccessMarker_(const Buffer& buf) {
       if (buf.scope() == "global") {
-        bit_vector_[StorageType::kGlobal] = true;
+        bit_vector_[static_cast<int>(StorageType::kGlobal)] = true;
       } else if (buf.scope() == "shared") {
-        bit_vector_[StorageType::kShared] = true;
+        bit_vector_[static_cast<int>(StorageType::kShared)] = true;
       } else if (buf.scope() == "local") {
-        bit_vector_[StorageType::kLocal] = true;
+        bit_vector_[static_cast<int>(StorageType::kLocal)] = true;
       } else {
-        bit_vector_[StorageType::kOthers] = true;
+        bit_vector_[static_cast<int>(StorageType::kOthers)] = true;
       }
     }
     bool NoAccesses() const {
-      return !(bit_vector_[StorageType::kGlobal] || bit_vector_[StorageType::kShared] ||
-               bit_vector_[StorageType::kLocal] || bit_vector_[StorageType::kOthers]);
+      return !(bit_vector_[static_cast<int>(StorageType::kGlobal)] ||
+               bit_vector_[static_cast<int>(StorageType::kShared)] ||
+               bit_vector_[static_cast<int>(StorageType::kLocal)] ||
+               bit_vector_[static_cast<int>(StorageType::kOthers)]);
     }
     bool OnlyGlobalAccesses() const {
-      return !(bit_vector_[StorageType::kShared] || bit_vector_[StorageType::kLocal] ||
-               bit_vector_[StorageType::kOthers]) &&
-             bit_vector_[StorageType::kGlobal];
+      return !(bit_vector_[static_cast<int>(StorageType::kShared)] ||
+               bit_vector_[static_cast<int>(StorageType::kLocal)] ||
+               bit_vector_[static_cast<int>(StorageType::kOthers)]) &&
+             bit_vector_[static_cast<int>(StorageType::kGlobal)];
     }
     bool OnlyLocalOrSharedAccesses() const {
-      return !(bit_vector_[StorageType::kGlobal] || bit_vector_[StorageType::kOthers]) &&
-             (bit_vector_[StorageType::kShared] || bit_vector_[StorageType::kLocal]);
+      return !(bit_vector_[static_cast<int>(StorageType::kGlobal)] ||
+               bit_vector_[static_cast<int>(StorageType::kOthers)]) &&
+             (bit_vector_[static_cast<int>(StorageType::kShared)] ||
+              bit_vector_[static_cast<int>(StorageType::kLocal)]);
     }
 
    private:
-    std::array<bool, StorageType::kOthers + 1> bit_vector_ = {false};
+    std::array<bool, static_cast<int>(StorageType::kOthers) + 1> bit_vector_ = {false};
   };
   AccessMarker read_marker_, write_marker_;
   std::pair<AccessMarker, AccessMarker> Analyze_(const Stmt& stmt) {
