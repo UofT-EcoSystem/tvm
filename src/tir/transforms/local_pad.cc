@@ -151,20 +151,20 @@ class PredicateInliner : public StmtExprVisitor {
  private:
   explicit PredicateInliner(const Stmt& body_stmt) : body_stmt_(body_stmt) {}
 
-#define VISIT_PREDICATE(OpType)                      \
-  void VisitExpr_(const OpType##Node* op) final {    \
-    OpType predicate = GetRef<OpType>(op);           \
-    if (CanInlinePredicate_<OpType##Node>(op)) {     \
-      inlinable_predicates_.push_back(predicate);    \
-    } else {                                         \
-      non_inlinable_residuals_.push_back(predicate); \
-    }                                                \
+#define TVM_TIR_TRANSFORM_LOCAL_PAD_VISIT_PREDICATE(OpType) \
+  void VisitExpr_(const OpType::ContainerType* op) final {  \
+    OpType predicate = GetRef<OpType>(op);                  \
+    if (CanInlinePredicate_<OpType::ContainerType>(op)) {   \
+      inlinable_predicates_.push_back(predicate);           \
+    } else {                                                \
+      non_inlinable_residuals_.push_back(predicate);        \
+    }                                                       \
   }
-  VISIT_PREDICATE(LT)
-  VISIT_PREDICATE(LE)
-  VISIT_PREDICATE(GT)
-  VISIT_PREDICATE(GE)
-#undef VISIT_PREDICATE
+  TVM_TIR_TRANSFORM_LOCAL_PAD_VISIT_PREDICATE(LT)
+  TVM_TIR_TRANSFORM_LOCAL_PAD_VISIT_PREDICATE(LE)
+  TVM_TIR_TRANSFORM_LOCAL_PAD_VISIT_PREDICATE(GT)
+  TVM_TIR_TRANSFORM_LOCAL_PAD_VISIT_PREDICATE(GE)
+#undef TVM_TIR_TRANSFORM_LOCAL_PAD_VISIT_PREDICATE
 
   void VisitStmt_(const BufferStoreNode* op) final {
     if (op->indices.size() != 1) {
