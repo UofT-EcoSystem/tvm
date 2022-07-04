@@ -286,8 +286,6 @@ Stmt LocalPadTransform(Stmt stmt) {
   return stmt;
 }
 
-}  // namespace transform
-
 Pass LocalPad(const bool enable_local_pad) {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     if (!enable_local_pad) {
@@ -302,6 +300,6 @@ Pass LocalPad(const bool enable_local_pad) {
 
 TVM_REGISTER_GLOBAL("tir.transform.LocalPad").set_body_typed(LocalPad);
 
+}  // namespace transform
 }  // namespace tir
-}  // namespace tvm
 }  // namespace tvm
