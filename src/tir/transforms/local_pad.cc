@@ -108,8 +108,8 @@ class InitChecker : public StmtVisitor {
   template <typename ImmNodeType>
   void CheckInitValue(const PrimExpr& rhs) {
     if (const ImmNodeType* rhs_val = rhs.as<ImmNodeType>()) {
-      if (init_constexpr_.defined()) {
-        if (const ImmNodeType* init_val = init_constexpr_.as<ImmNodeType>()) {
+      if (init_constexpr_) {
+        if (const ImmNodeType* init_val = init_constexpr_.value().as<ImmNodeType>()) {
           if (rhs_val->value != init_val->value) {
             init_with_single_constexpr_ = false;
           }
@@ -130,7 +130,7 @@ class InitChecker : public StmtVisitor {
   }
 
   bool init_with_single_constexpr_ = false;
-  PrimExpr init_constexpr_;
+  Optional<PrimExpr> init_constexpr_;
 
   friend class LocalPadder;
 };
@@ -211,11 +211,14 @@ class LocalPadder : public StmtExprMutator {
       // In the case when there are no buffer reads and only local/shared buffer writes, remove the
       // predicates and obtain the buffer initialization values.
       init_checker_(op->then_case);
-      if (!init_checker_.init_constexpr_.defined()) {
+      if (!init_checker_.init_constexpr_) {
         return StmtExprMutator::VisitStmt_(op);
       }
       return StmtExprMutator::VisitStmt(op->then_case);
     } else if (read_marker.OnlyGlobalAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
+      if (!init_checker_.init_constexpr_) {
+        return StmtExprMutator::VisitStmt_(op);
+      }
       // In the case when there are global buffer reads and local/shared buffer writes, inline the
       // predicates as part of the buffer store statements.
       PredicateInliner predicate_inliner(op->then_case);
@@ -244,8 +247,8 @@ class LocalPadder : public StmtExprMutator {
                         inlined_body_stmt);
     } else if (read_marker.OnlyLocalOrSharedAccesses() &&
                write_marker.OnlyLocalOrSharedAccesses()) {
-      // In the case when there are global buffer reads and local/shared buffer writes, inline the
-      // predicates as part of the buffer store statements.
+      // In the case when there are global buffer reads and local/shared buffer writes, remove the
+      // predicates.
       return StmtExprMutator::VisitStmt(op->then_case);
     }
     return StmtExprMutator::VisitStmt_(op);
@@ -260,10 +263,11 @@ class LocalPadder : public StmtExprMutator {
                        op->indices);
   }
   PrimExpr ComposePaddedValue(const DataType& dtype) const {
-    if (init_checker_.init_constexpr_->dtype != dtype) {
-      return Cast(dtype, init_checker_.init_constexpr_);
+    CHECK(init_checker_.init_constexpr_);
+    if (init_checker_.init_constexpr_.value()->dtype != dtype) {
+      return Cast(dtype, init_checker_.init_constexpr_.value());
     }
-    return init_checker_.init_constexpr_;
+    return init_checker_.init_constexpr_.value();
   }
   PrimExpr FlattenPredicates(const Array<PrimExpr>& predicates) const {
     CHECK(!predicates.empty());
