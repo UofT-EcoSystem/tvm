@@ -204,8 +204,8 @@ def test_dense_local_padding():
     # The workload is deliberately selected so that it does not fit into the sample schedule.
     mod = MatMulNNOriginalModule
     mod = preprocess(mod)
-    mod = LocalPad(True)(mod)
-    mod = VectorizeLoop(False, True)(mod)
+    # mod = LocalPad(True)(mod)
+    # mod = VectorizeLoop(False, True)(mod)
     expected_mod = MatMulNNExpectedModule
     expected_mod = preprocess(expected_mod)
 
