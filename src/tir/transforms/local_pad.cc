@@ -107,9 +107,9 @@ class InitChecker : public StmtVisitor {
   }
   template <typename ImmNodeType>
   void CheckInitValue(const PrimExpr& rhs) {
-    if (const ImmNodeType* const rhs_val = rhs.as<ImmNodeType>()) {
+    if (const ImmNodeType* rhs_val = rhs.as<ImmNodeType>()) {
       if (init_constexpr_.defined()) {
-        if (const ImmNodeType* const init_val = init_constexpr_.as<ImmNodeType>()) {
+        if (const ImmNodeType* init_val = init_constexpr_.as<ImmNodeType>()) {
           if (rhs_val->value != init_val->value) {
             init_with_single_constexpr_ = false;
           }
@@ -288,7 +288,7 @@ Stmt LocalPadTransform(Stmt stmt) {
   return stmt;
 }
 
-Pass LocalPad(const bool enable_local_pad) {
+Pass LocalPad(bool enable_local_pad) {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     if (!enable_local_pad) {
       return f;

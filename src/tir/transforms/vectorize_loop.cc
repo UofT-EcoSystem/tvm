@@ -706,7 +706,7 @@ Stmt SkipVectorize(Stmt stmt) { return VectorizeSkipper()(std::move(stmt)); }
 namespace transform {
 
 // TODO(tvm-team): Make it as a target property.
-Pass VectorizeLoop(const bool enable_vectorize, const bool enable_local_pad) {
+Pass VectorizeLoop(bool enable_vectorize, bool enable_local_pad) {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     auto* n = f.CopyOnWrite();
     if (enable_vectorize) {
