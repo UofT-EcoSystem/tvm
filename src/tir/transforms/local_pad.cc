@@ -40,16 +40,16 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
   enum class StorageType : int32_t { kGlobal = 0, kShared = 1, kLocal = 2, kOthers = 3 };
 
   void VisitStmt_(const BufferStoreNode* op) final {
-    write_marker_.SetStorageAccessMarker_(op->buffer);
+    write_marker_.SetStorageAccessMarker(op->buffer);
     StmtExprVisitor::VisitStmt_(op);
   }
   void VisitExpr_(const BufferLoadNode* op) final {
-    read_marker_.SetStorageAccessMarker_(op->buffer);
+    read_marker_.SetStorageAccessMarker(op->buffer);
     StmtExprVisitor::VisitExpr_(op);
   }
   class AccessMarker {
    public:
-    void SetStorageAccessMarker_(const Buffer& buf) {
+    void SetStorageAccessMarker(const Buffer& buf) {
       using runtime::StorageScope;
 
       if (StorageScope::Create(buf.scope()) == StorageScope::Create("global")) {
@@ -85,7 +85,7 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
     std::array<bool, static_cast<int>(StorageType::kOthers) + 1> bit_vector_ = {false};
   };
   AccessMarker read_marker_, write_marker_;
-  std::pair<AccessMarker, AccessMarker> Analyze_(const Stmt& stmt) {
+  std::pair<AccessMarker, AccessMarker> Analyze(const Stmt& stmt) {
     VisitStmt(stmt);
     return std::make_pair(read_marker_, write_marker_);
   }
@@ -154,7 +154,7 @@ class PredicateInliner : public StmtExprVisitor {
 #define TVM_TIR_TRANSFORM_LOCAL_PAD_VISIT_PREDICATE(OpType) \
   void VisitExpr_(const OpType::ContainerType* op) final {  \
     OpType predicate = GetRef<OpType>(op);                  \
-    if (CanInlinePredicate_<OpType::ContainerType>(op)) {   \
+    if (CanInlinePredicate<OpType::ContainerType>(op)) {    \
       inlinable_predicates_.push_back(predicate);           \
     } else {                                                \
       non_inlinable_residuals_.push_back(predicate);        \
@@ -170,7 +170,9 @@ class PredicateInliner : public StmtExprVisitor {
     if (op->indices.size() != 1) {
       return StmtVisitor::VisitStmt_(op);
     }
-    CHECK(op->buffer.scope() == "shared" || op->buffer.scope() == "local");
+    using runtime::StorageScope;
+    CHECK(StorageScope::Create(op->buffer.scope()) == StorageScope::Create("shared") ||
+          StorageScope::Create(op->buffer.scope()) == StorageScope::Create("local"));
     if (StructuralEqual()(op->indices[0], predicate_lhs_)) {
       predicate_inlinable_ = false;
     }
@@ -180,7 +182,7 @@ class PredicateInliner : public StmtExprVisitor {
    * \brief Check if a predicate can be inlined.
    */
   template <typename OpNodeType>
-  bool CanInlinePredicate_(const OpNodeType* op) {
+  bool CanInlinePredicate(const OpNodeType* op) {
     predicate_inlinable_ = true;
     predicate_lhs_ = op->a;
     VisitStmt(body_stmt_);
@@ -203,7 +205,7 @@ class LocalPadder : public StmtExprMutator {
     }
     // Analyze the reads and writes of the body statements.
     StorageAccessAnalyzer::AccessMarker read_marker, write_marker;
-    std::tie(read_marker, write_marker) = StorageAccessAnalyzer().Analyze_(op->then_case);
+    std::tie(read_marker, write_marker) = StorageAccessAnalyzer().Analyze(op->then_case);
 
     if (read_marker.NoAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
       // In the case when there are no buffer reads and only local/shared buffer writes, remove the
@@ -238,7 +240,7 @@ class LocalPadder : public StmtExprMutator {
       if (predicate_inliner.non_inlinable_residuals_.empty()) {
         return inlined_body_stmt;
       }
-      return IfThenElse(FlattenPredicates_(predicate_inliner.non_inlinable_residuals_),
+      return IfThenElse(FlattenPredicates(predicate_inliner.non_inlinable_residuals_),
                         inlined_body_stmt);
     } else if (read_marker.OnlyLocalOrSharedAccesses() &&
                write_marker.OnlyLocalOrSharedAccesses()) {
@@ -252,18 +254,18 @@ class LocalPadder : public StmtExprMutator {
     if (!enable_padding_ || predicate_stack_.empty()) {
       return StmtExprMutator::VisitStmt_(op);
     }
-    PrimExpr store_predicate = FlattenPredicates_(predicate_stack_);
+    PrimExpr store_predicate = FlattenPredicates(predicate_stack_);
     return BufferStore(op->buffer,
-                       Select(store_predicate, op->value, ComposePaddedValue_(op->value->dtype)),
+                       Select(store_predicate, op->value, ComposePaddedValue(op->value->dtype)),
                        op->indices);
   }
-  PrimExpr ComposePaddedValue_(const DataType& dtype) const {
+  PrimExpr ComposePaddedValue(const DataType& dtype) const {
     if (init_checker_.init_constexpr_->dtype != dtype) {
       return Cast(dtype, init_checker_.init_constexpr_);
     }
     return init_checker_.init_constexpr_;
   }
-  PrimExpr FlattenPredicates_(const Array<PrimExpr>& predicates) const {
+  PrimExpr FlattenPredicates(const Array<PrimExpr>& predicates) const {
     CHECK(!predicates.empty());
     PrimExpr ret = predicates.front();
     for (auto predicates_it = predicates.begin() + 1; predicates_it != predicates.end();
