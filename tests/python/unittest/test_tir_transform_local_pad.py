@@ -230,20 +230,11 @@ def test_dense_local_padding():
     # The workload is deliberately selected so that it does not fit into the sample schedule.
     tir_sched = Schedule(MatMulNN(960, 770, 2304))
     sample_dense_sched(tir_sched)
-
-    print(tir_sched.mod.script())
-
     mod = tir_sched.mod
-    
     mod = preprocess(mod)
     mod = LocalPad(True)(mod)
     mod = VectorizeLoop(False, True)(mod)
-
-    # print(mod)
     preprocess(MatMulNNExpectedModule)
-
-    # print(tir_sched.mod["main"])
-    # print(tvm.lower(tir_sched.mod["main"], []))
 
 
 if __name__ == "__main__":

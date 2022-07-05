@@ -150,7 +150,7 @@ def LiftAttrScope(attr_key: str):
     return _ffi_api.LiftAttrScope(attr_key)  # type: ignore
 
 
-def LocalPad():
+def LocalPad(enable_local_pad: bool = False):
     """Pad tensors by the size of the local workspace.
 
     Returns
@@ -158,7 +158,7 @@ def LocalPad():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.LocalPad()  # type: ignore
+    return _ffi_api.LocalPad(enable_local_pad)  # type: ignore
 
 
 def LoopPartition():
