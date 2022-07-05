@@ -15,10 +15,12 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint: disable=missing-module-docstring
-import numpy as np
 from tvm.script import tir as T
 import tvm.testing
 from tvm.tir import Schedule
+from tvm.tir.transform.transform import LowerInitBlock, PlanAndUpdateBufferAllocationLocation, \
+                                        ConvertBlocksToOpaque, CompactBufferAllocation, \
+                                        FlattenBuffer, Simplify, LocalPad, VectorizeLoop
 
 
 def sample_dense_sched(sch):  # pylint: disable=too-many-statements
@@ -85,21 +87,138 @@ def sample_dense_sched(sch):  # pylint: disable=too-many-statements
     # pylint: enable=unused-variable, invalid-name. too-many-locals, too-many-statements
 
 
-@T.prim_func
-def Dense_960x770x2304(a: T.handle, b: T.handle, c: T.handle) -> None:
+def MatMulNN(M: int, K: int, N: int):
     # pylint: disable=invalid-name, no-member, missing-function-docstring
-    #
-    # The workload is deliberately selected so that it does not fit into the sample schedule.
-    A = T.match_buffer(a, [960, 770])
-    B = T.match_buffer(b, [770, 2304])
-    C = T.match_buffer(c, [960, 2304])
-    for i, j, k in T.grid(960, 2304, 770):
-        with T.block("update"):
-            vi, vj, vk = T.axis.remap("SSR", [i, j, k])
-            with T.init():
-                C[vi, vj] = 0.0
-            C[vi, vj] = C[vi, vj] + A[vi, vk] * B[vk, vj]
+    @T.prim_func
+    def wkl_func(a: T.handle, b: T.handle, c: T.handle) -> None:
+        A = T.match_buffer(a, [M, K])
+        B = T.match_buffer(b, [K, N])
+        C = T.match_buffer(c, [M, N])
+        for i, j, k in T.grid(M, N, K):
+            with T.block("update"):
+                vi, vj, vk = T.axis.remap("SSR", [i, j, k])
+                with T.init():
+                    C[vi, vj] = 0.0
+                C[vi, vj] = C[vi, vj] + A[vi, vk] * B[vk, vj]
+    return wkl_func
     # pylint: enable=invalid-name, no-member, missing-function-docstring
+
+
+@tvm.script.ir_module
+class MatMulNNExpectedModule:
+    """
+    The expected module generated from the local padding pass.
+    """
+    # pylint: disable=invalid-name, no-member, missing-function-docstring, no-self-argument, too-many-locals, too-many-nested-blocks, too-many-branches, too-few-public-methods
+    @T.prim_func
+    def main(A: T.Buffer[(960, 770), "float32"], B: T.Buffer[(770, 2304), "float32"],
+             C: T.Buffer[(960, 2304), "float32"]) -> None:
+        C_local = T.alloc_buffer([960, 2304], dtype="float32", scope="local")
+        A_shared = T.alloc_buffer([960, 770], dtype="float32", scope="shared")
+        B_shared = T.alloc_buffer([770, 2304], dtype="float32", scope="shared")
+        for i_0_j_0_fused in \
+                T.thread_binding(144, thread="blockIdx.x",
+                                 annotations={"pragma_auto_unroll_max_step":512,
+                                              "pragma_unroll_explicit":1}):
+            for i_1_j_1_fused in T.thread_binding(2, thread="vthread.x"):
+                for i_2_j_2_fused in T.thread_binding(256, thread="threadIdx.x"):
+                    for i_3_init, j_3_init, i_4_init, j_4_init in T.grid(8, 1, 2, 2):
+                        with T.block("update_init"):
+                            vi = T.axis.spatial(960,
+                                (((i_0_j_0_fused // 18 + 0) * 8 + i_2_j_2_fused // 32) * 8 +
+                                 i_3_init) * 2 + i_4_init
+                            )
+                            vj = T.axis.spatial(2304,
+                                ((i_0_j_0_fused % 18 * 2 + i_1_j_1_fused % 2) * 32 +
+                                 i_2_j_2_fused % 32 + j_3_init) * 2 + j_4_init
+                            )
+                            T.reads()
+                            T.writes(C_local[vi, vj])
+                            T.block_attr({"meta_schedule.tiling_structure":"SSSRRSRS"})
+                            C_local[vi, vj] = T.float32(0)
+                    for k_0 in T.serial(193):
+                        for ax0_ax1_fused_0 in T.serial(1):
+                            for ax0_ax1_fused_1 in T.thread_binding(256, thread="threadIdx.x"):
+                                for ax0_ax1_fused_2 in T.vectorized(3):
+                                    with T.block("A_shared"):
+                                        v0 = T.axis.spatial(960,
+                                            i_0_j_0_fused // 18 * 128 +
+                                            (ax0_ax1_fused_0 * 768 + ax0_ax1_fused_1 * 3 +
+                                             ax0_ax1_fused_2) // 4
+                                        )
+                                        v1 = T.axis.spatial(770,
+                                            k_0 * 4 +
+                                            (ax0_ax1_fused_0 * 768 + ax0_ax1_fused_1 * 3 +
+                                             ax0_ax1_fused_2) % 4
+                                        )
+                                        T.where((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 3 +
+                                                ax0_ax1_fused_2 < 512)
+                                        T.reads(A[v0, v1])
+                                        T.writes(A_shared[v0, v1])
+                                        A_shared[v0, v1] = A[v0, v1]
+                        for ax0_ax1_fused_0 in T.serial(1):
+                            for ax0_ax1_fused_1 in T.thread_binding(256, thread="threadIdx.x"):
+                                for ax0_ax1_fused_2 in T.vectorized(4):
+                                    with T.block("B_shared"):
+                                        v0 = T.axis.spatial(770,
+                                            k_0 * 4 +
+                                            (ax0_ax1_fused_0 * 1024 + ax0_ax1_fused_1 * 4 +
+                                             ax0_ax1_fused_2) // 128
+                                        )
+                                        v1 = T.axis.spatial(2304,
+                                            i_0_j_0_fused % 18 * 128 +
+                                            (ax0_ax1_fused_0 * 1024 + ax0_ax1_fused_1 * 4 +
+                                             ax0_ax1_fused_2) % 128
+                                        )
+                                        T.where((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 4 +
+                                                ax0_ax1_fused_2 < 512)
+                                        T.reads(B[v0, v1])
+                                        T.writes(B_shared[v0, v1])
+                                        B_shared[v0, v1] = B[v0, v1]
+                        for k_1, i_3, j_3, k_2, i_4, j_4 in T.grid(1, 8, 1, 4, 2, 2):
+                            with T.block("update_update"):
+                                vi = T.axis.spatial(960,
+                                    (((i_0_j_0_fused // 18 + 0) * 8 + i_2_j_2_fused // 32) * 8 +
+                                     i_3) * 2 + i_4
+                                )
+                                vj = T.axis.spatial(2304,
+                                    ((i_0_j_0_fused % 18 * 2 + i_1_j_1_fused % 2) * 32 +
+                                     i_2_j_2_fused % 32 + j_3) * 2 + j_4
+                                )
+                                vk = T.axis.reduce(770, (k_0 + k_1) * 4 + k_2)
+                                T.reads(C_local[vi, vj], A_shared[vi, vk], B_shared[vk, vj])
+                                T.writes(C_local[vi, vj])
+                                T.block_attr({"meta_schedule.tiling_structure":"SSSRRSRS"})
+                                C_local[vi, vj] = \
+                                        C_local[vi, vj] + A_shared[vi, vk] * B_shared[vk, vj]
+                    for ax0, ax1 in T.grid(16, 2):
+                        with T.block("C_local"):
+                            v0 = T.axis.spatial(960,
+                                i_0_j_0_fused // 18 * 128 + i_2_j_2_fused // 32 * 16 + ax0
+                            )
+                            v1 = T.axis.spatial(2304,
+                                i_0_j_0_fused % 18 * 128 + i_1_j_1_fused * 64 +
+                                i_2_j_2_fused % 32 * 2 + ax1
+                            )
+                            T.where(i_0_j_0_fused // 18 * 128 + i_2_j_2_fused // 32 * 16 +
+                                    ax0 < 960)
+                            T.reads(C_local[v0, v1])
+                            T.writes(C[v0, v1])
+                            C[v0, v1] = C_local[v0, v1]
+    # pylint: enable=invalid-name, no-member, missing-function-docstring, no-self-argument, too-many-locals, too-many-nested-blocks, too-many-branches, too-few-public-methods
+
+
+def preprocess(mod):
+    mod = LowerInitBlock()(mod)
+    mod = PlanAndUpdateBufferAllocationLocation()(mod)
+    mod = ConvertBlocksToOpaque()(mod)
+    mod = CompactBufferAllocation()(mod)
+
+    print(mod)
+
+    mod = FlattenBuffer()(mod)
+    mod = Simplify()(mod)
+    return mod
 
 
 @tvm.testing.requires_gpu
@@ -108,61 +227,24 @@ def test_dense_local_padding():
     """
     Test that local padding is delivering the correct compute outcome.
     """
-    x_np = np.random.uniform(-0.1, 0.1, size=(960, 770)).astype(np.float32)
-    w_np = np.random.uniform(-0.1, 0.1, size=(770, 2304)).astype(np.float32)
-    y_np = np.matmul(x_np, w_np)
-    y_empty = np.empty(shape=y_np.shape, dtype=y_np.dtype)
-    tir_sched = Schedule(Dense_960x770x2304)
-    sample_dense_sched(tir_sched)
-    with tvm.transform.PassContext(config={"tir.enable_local_pad": True}):
-        cuda_kernel = tvm.build(tir_sched.mod["main"], [], target="cuda")
-    cuda_ctx = tvm.cuda()
-    module_data = [x_np, w_np, y_empty]
-    module_data = [tvm.nd.array(d, device=cuda_ctx) for d in module_data]
-    cuda_kernel(*module_data)
-    np.testing.assert_allclose(module_data[-1].numpy(), y_np, atol=1e-3, rtol=1e-3)
-
-
-@T.prim_func
-def Dense_100x770x2304(a: T.handle, b: T.handle, c: T.handle) -> None:
-    # pylint: disable=invalid-name, no-member, missing-function-docstring
-    #
     # The workload is deliberately selected so that it does not fit into the sample schedule.
-    # Furthermore, it is also used to test corner cases when the loop extents are smaller than the
-    # tile sizes specified by the schedule (i.e., 100 < 128).
-    A = T.match_buffer(a, [100, 770])
-    B = T.match_buffer(b, [770, 2304])
-    C = T.match_buffer(c, [100, 2304])
-    for i, j, k in T.grid(100, 2304, 770):
-        with T.block("update"):
-            vi, vj, vk = T.axis.remap("SSR", [i, j, k])
-            with T.init():
-                C[vi, vj] = 0.0
-            C[vi, vj] = C[vi, vj] + A[vi, vk] * B[vk, vj]
-    # pylint: enable=invalid-name, no-member, missing-function-docstring
-
-
-@tvm.testing.requires_gpu
-@tvm.testing.requires_cuda
-def test_dense_local_padding_extent_lt_tile_size():
-    """
-    Test that local padding is delivering the correct compute outcome.
-    """
-    x_np = np.random.uniform(-0.1, 0.1, size=(100, 770)).astype(np.float32)
-    w_np = np.random.uniform(-0.1, 0.1, size=(770, 2304)).astype(np.float32)
-    y_np = np.matmul(x_np, w_np)
-    y_empty = np.empty(shape=y_np.shape, dtype=y_np.dtype)
-    tir_sched = Schedule(Dense_100x770x2304)
+    tir_sched = Schedule(MatMulNN(960, 770, 2304))
     sample_dense_sched(tir_sched)
-    with tvm.transform.PassContext(config={"tir.enable_local_pad": True}):
-        cuda_kernel = tvm.build(tir_sched.mod["main"], [], target="cuda")
-    cuda_ctx = tvm.cuda()
-    module_data = [x_np, w_np, y_empty]
-    module_data = [tvm.nd.array(d, device=cuda_ctx) for d in module_data]
-    cuda_kernel(*module_data)
-    np.testing.assert_allclose(module_data[-1].numpy(), y_np, atol=1e-3, rtol=1e-3)
+
+    print(tir_sched.mod.script())
+
+    mod = tir_sched.mod
+    
+    mod = preprocess(mod)
+    mod = LocalPad(True)(mod)
+    mod = VectorizeLoop(False, True)(mod)
+
+    # print(mod)
+    preprocess(MatMulNNExpectedModule)
+
+    # print(tir_sched.mod["main"])
+    # print(tvm.lower(tir_sched.mod["main"], []))
 
 
 if __name__ == "__main__":
     test_dense_local_padding()
-    test_dense_local_padding_extent_lt_tile_size()
