@@ -19,7 +19,8 @@ from tvm.script import tir as T
 import tvm.testing
 from tvm.tir.transform.transform import LowerInitBlock, PlanAndUpdateBufferAllocationLocation, \
                                         ConvertBlocksToOpaque, CompactBufferAllocation, \
-                                        FlattenBuffer, Simplify, LocalPad, VectorizeLoop
+                                        FlattenBuffer, Simplify, LocalPad, VectorizeLoop, \
+                                        InjectVirtualThread, StorageRewrite
 
 
 @tvm.script.ir_module
@@ -256,7 +257,7 @@ class MatMulNNExpectedModule:
 
 def preprocess(mod):
     """
-    Preprocess the IR module by lowering the BlockScope's.
+    Pre-process the IRModule by lowering the BlockScope's.
     """
     mod = LowerInitBlock()(mod)
     mod = PlanAndUpdateBufferAllocationLocation()(mod)
@@ -264,6 +265,15 @@ def preprocess(mod):
     mod = CompactBufferAllocation()(mod)
     mod = FlattenBuffer()(mod)
     mod = Simplify()(mod)
+    return mod
+
+
+def postprocess(mod):
+    """
+    Post-process the IRModule. This is to ensure that the shared memory variables are ordered.
+    """
+    mod = InjectVirtualThread()(mod)
+    mod = StorageRewrite()(mod)
     return mod
 
 
@@ -280,7 +290,7 @@ def test_dense_local_padding():
     mod = VectorizeLoop(False, True)(mod)
     expected_mod = MatMulNNExpectedModule
     expected_mod = preprocess(expected_mod)
-    tvm.ir.assert_structural_equal(mod, expected_mod)
+    tvm.ir.assert_structural_equal(postprocess(mod), postprocess(expected_mod))
 
 
 if __name__ == "__main__":
