@@ -269,8 +269,8 @@ class BufferAccessRegionCollector : public StmtExprVisitor {
         dom_map_.erase(dom_it);
       }
       // Step 2. Relax the access region
-      NDIntSet nd_int_set = NDIntSetEval(buffer_region->region, predicate_in_scope, dom_map_,
-                                         &dom_analyzer_);
+      NDIntSet nd_int_set =
+          NDIntSetEval(buffer_region->region, predicate_in_scope, dom_map_, &dom_analyzer_);
       // Step 3. Restore the non-relaxed ancestor loops domain
       for (size_t i = 0; i < n_ancestor_loops; ++i) {
         const VarNode* v = ancestor_loops_[i]->loop_var.get();
