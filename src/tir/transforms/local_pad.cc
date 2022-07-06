@@ -199,6 +199,25 @@ class PredicateInliner : public StmtExprVisitor {
 
 class LocalPadder : public StmtExprMutator {
  private:
+  Stmt VisitStmt_(const ForNode* op) final {
+    if (init_verified_by_outer_stmts_) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+    StorageAccessAnalyzer::AccessMarker read_marker, write_marker;
+    std::tie(read_marker, write_marker) = StorageAccessAnalyzer().Analyze(op->body);
+
+    if (read_marker.NoAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
+      // In the case when there are no buffer reads and only local/shared buffer writes, remove the
+      // predicates and obtain the buffer initialization values.
+      init_checker_(op->body);
+      if (init_checker_.init_constexpr_) {
+        init_verified_by_outer_stmts_ = true;
+        return StmtExprMutator::VisitStmt_(op);
+        init_verified_by_outer_stmts_ = false;
+      }
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
   Stmt VisitStmt_(const IfThenElseNode* op) final {
     if (!is_no_op(op->else_case)) {
       return StmtExprMutator::VisitStmt_(op);
@@ -207,15 +226,7 @@ class LocalPadder : public StmtExprMutator {
     StorageAccessAnalyzer::AccessMarker read_marker, write_marker;
     std::tie(read_marker, write_marker) = StorageAccessAnalyzer().Analyze(op->then_case);
 
-    if (read_marker.NoAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
-      // In the case when there are no buffer reads and only local/shared buffer writes, remove the
-      // predicates and obtain the buffer initialization values.
-      init_checker_(op->then_case);
-      if (!init_checker_.init_constexpr_) {
-        return StmtExprMutator::VisitStmt_(op);
-      }
-      return StmtExprMutator::VisitStmt(op->then_case);
-    } else if (read_marker.OnlyGlobalAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
+    if (read_marker.OnlyGlobalAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
       if (!init_checker_.init_constexpr_) {
         return StmtExprMutator::VisitStmt_(op);
       }
@@ -280,6 +291,7 @@ class LocalPadder : public StmtExprMutator {
   }
 
   InitChecker init_checker_;
+  bool init_verified_by_outer_stmts_ = false;
   std::vector<PrimExpr> predicate_stack_;
   bool enable_padding_ = false;
 };
