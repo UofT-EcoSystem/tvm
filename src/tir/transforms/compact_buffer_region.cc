@@ -62,11 +62,13 @@ Region SimplifyAndNarrowBufferRegionFromNDIntSet(const NDIntSet& nd_int_set,
 
 /*! \brief a more constrained bound estimate for n-dimentional int set */
 NDIntSet NDIntSetEval(Region region, PrimExpr predicate,
-                      const std::unordered_map<const VarNode*, arith::IntSet>& dom_map,
+                      const std::unordered_map<const VarNode*, arith::IntSet>& dom_std_map,
                       const std::vector<const VarNode*>& ancestor_loop_vars,
                       arith::Analyzer* analyzer) {
+  Map<Var, arith::IntSet> dom_map;
   std::unordered_map<Var, Range, ObjectPtrHash, ObjectEqual> var_dom;
-  for (const auto& it : dom_map) {
+  for (const auto& it : dom_std_map) {
+    dom_map.Set(GetRef<Var>(it.first), it.second);
     var_dom[GetRef<Var>(it.first)] = it.second.CoverRange(Range::FromMinExtent(0, 0));
   }
   Optional<Array<arith::IntSet>> eval_res =
@@ -75,6 +77,13 @@ NDIntSet NDIntSetEval(Region region, PrimExpr predicate,
     NDIntSet res(0);
     for (const auto& it : eval_res.value()) {
       PrimExpr extent = analyzer->Simplify(it.max() - it.min() + 1);
+
+      LOG(INFO) << "orig_extent=" << extent;
+
+      // extent = analyzer->const_int_bound(extent)->max_value;
+
+     extent = Integer(analyzer->const_int_bound(extent)->max_value);
+
       // skip accurate region analysis result if there are outer loop dependencies.
       if (UsesVar(extent, [&ancestor_loop_vars](const VarNode* v) {
             return std::find(ancestor_loop_vars.begin(), ancestor_loop_vars.end(), v) !=
@@ -88,7 +97,7 @@ NDIntSet NDIntSetEval(Region region, PrimExpr predicate,
       return res;
     }
   }
-  return support::NDIntSetEval(support::NDIntSetFromRegion(region), dom_map);
+  return support::NDIntSetEval(support::NDIntSetFromRegion(region), dom_std_map);
 }
 
 /*!
