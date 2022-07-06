@@ -50,17 +50,23 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
       write_marker_.SetStorageAccessMarker(GetRef<Var>(op));
     }
   }
-  struct ReadScope {
-    ReadScope(StorageAccessAnalyzer* analyzer) : analyzer(analyzer) {}
-    void EnterWithScope() { analyzer->rw_mode_ = RWMode::kRead; }
-    void ExitWithScope() { analyzer->rw_mode_ = RWMode::kUnset; }
-    StorageAccessAnalyzer* analyzer;
+  class ReadScope {
+   public:
+    explicit ReadScope(StorageAccessAnalyzer* analyzer) : analyzer_(analyzer) {}
+    void EnterWithScope() { analyzer_->rw_mode_ = RWMode::kRead; }
+    void ExitWithScope() { analyzer_->rw_mode_ = RWMode::kUnset; }
+
+   private:
+    StorageAccessAnalyzer* analyzer_;
   };
-  struct WriteScope {
-    WriteScope(StorageAccessAnalyzer* analyzer) : analyzer(analyzer) {}
-    void EnterWithScope() { analyzer->rw_mode_ = RWMode::kWrite; }
-    void ExitWithScope() { analyzer->rw_mode_ = RWMode::kUnset; }
-    StorageAccessAnalyzer* analyzer;
+  class WriteScope {
+   public:
+    explicit WriteScope(StorageAccessAnalyzer* analyzer) : analyzer_(analyzer) {}
+    void EnterWithScope() { analyzer_->rw_mode_ = RWMode::kWrite; }
+    void ExitWithScope() { analyzer_->rw_mode_ = RWMode::kUnset; }
+
+   private:
+    StorageAccessAnalyzer* analyzer_;
   };
 
   void VisitStmt_(const BufferStoreNode* op) final {
