@@ -226,7 +226,12 @@ class LocalPadder : public StmtExprMutator {
     StorageAccessAnalyzer::AccessMarker read_marker, write_marker;
     std::tie(read_marker, write_marker) = StorageAccessAnalyzer().Analyze(op->then_case);
 
-    if (read_marker.OnlyGlobalAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
+    if (read_marker.NoAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
+      if (init_verified_by_outer_stmts_) {
+        return StmtExprMutator::VisitStmt(op->then_case);
+      }
+      return StmtExprMutator::VisitStmt_(op);
+    } else if (read_marker.OnlyGlobalAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
       if (!init_checker_.init_constexpr_) {
         return StmtExprMutator::VisitStmt_(op);
       }

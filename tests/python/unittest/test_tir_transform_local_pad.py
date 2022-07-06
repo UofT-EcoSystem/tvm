@@ -69,8 +69,9 @@ class MatMulNNOriginalModule:
                                             (ax0_ax1_fused_0 * 768 + ax0_ax1_fused_1 * 3 +
                                              ax0_ax1_fused_2) % 4
                                         )
-                                        T.where(i_0_j_0_fused // 18 * 128 +
-                                            ((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 3 +
+                                        T.where(
+                                            i_0_j_0_fused // 18 * 128 +
+                                             ((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 3 +
                                              ax0_ax1_fused_2) // 4 < 960 and
                                             k_0 * 4 + ((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 3
                                              + ax0_ax1_fused_2) % 4 < 770 and
@@ -170,7 +171,7 @@ class MatMulNNExpectedModule:
                     for k_0 in T.serial(193):
                         for ax0_ax1_fused_0 in T.serial(1):
                             for ax0_ax1_fused_1 in T.thread_binding(256, thread="threadIdx.x"):
-                                for ax0_ax1_fused_2 in T.vectorized(3):
+                                for ax0_ax1_fused_2 in T.serial(3):
                                     with T.block("A_shared"):
                                         v0 = T.axis.spatial(960,
                                             i_0_j_0_fused // 18 * 128 +
@@ -186,10 +187,18 @@ class MatMulNNExpectedModule:
                                                 ax0_ax1_fused_2 < 512)
                                         T.reads(A[v0, v1])
                                         T.writes(A_shared[v0, v1])
-                                        A_shared[v0, v1] = A[v0, v1]
+                                        A_shared[v0, v1] = \
+                                            T.Select(
+                                                i_0_j_0_fused // 18 * 128 +
+                                                 ((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 3 +
+                                                 ax0_ax1_fused_2) // 4 < 960 and
+                                                k_0 * 4 + ((ax0_ax1_fused_0 * 256 +
+                                                 ax0_ax1_fused_1) * 3 + ax0_ax1_fused_2) % 4 < 770,
+                                                A[v0, v1], 0.
+                                            )
                         for ax0_ax1_fused_0 in T.serial(1):
                             for ax0_ax1_fused_1 in T.thread_binding(256, thread="threadIdx.x"):
-                                for ax0_ax1_fused_2 in T.vectorized(4):
+                                for ax0_ax1_fused_2 in T.serial(4):
                                     with T.block("B_shared"):
                                         v0 = T.axis.spatial(770,
                                             k_0 * 4 +
@@ -205,7 +214,13 @@ class MatMulNNExpectedModule:
                                                 ax0_ax1_fused_2 < 512)
                                         T.reads(B[v0, v1])
                                         T.writes(B_shared[v0, v1])
-                                        B_shared[v0, v1] = B[v0, v1]
+                                        B_shared[v0, v1] = \
+                                            T.Select(
+                                                k_0 * 4 + ((ax0_ax1_fused_0 * 256 +
+                                                 ax0_ax1_fused_1) * 4 + ax0_ax1_fused_2) // 128
+                                                 < 770,
+                                                B[v0, v1], 0.
+                                            )
                         for k_1, i_3, j_3, k_2, i_4, j_4 in T.grid(1, 8, 1, 4, 2, 2):
                             with T.block("update_update"):
                                 vi = T.axis.spatial(960,
@@ -265,8 +280,7 @@ def test_dense_local_padding():
     mod = VectorizeLoop(False, True)(mod)
     expected_mod = MatMulNNExpectedModule
     expected_mod = preprocess(expected_mod)
-
-    print(mod, expected_mod)
+    tvm.ir.assert_structural_equal(mod, expected_mod)
 
 
 if __name__ == "__main__":
