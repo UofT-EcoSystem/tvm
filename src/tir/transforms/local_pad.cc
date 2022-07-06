@@ -64,12 +64,18 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
   };
 
   void VisitStmt_(const BufferStoreNode* op) final {
-    With<WriteScope> write_scope(this);
-    VisitExpr(op->buffer->data);
+    {
+      With<WriteScope> write_scope(this);
+      VisitExpr(op->buffer->data);
+    }
+    StmtExprVisitor::VisitStmt_(op);
   }
   void VisitExpr_(const BufferLoadNode* op) final {
-    With<ReadScope> read_scope(this);
-    VisitExpr(op->buffer->data);
+    {
+      With<ReadScope> read_scope(this);
+      VisitExpr(op->buffer->data);
+    }
+    StmtExprVisitor::VisitExpr_(op);
   }
   // Check opaque acccesses within the WMMA instructions.
   void VisitExpr_(const CallNode* op) final {
