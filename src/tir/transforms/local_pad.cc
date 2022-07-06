@@ -17,6 +17,8 @@
  * under the License.
  */
 
+#include <tvm/ir/type.h>
+#include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt.h>
 #include <tvm/tir/stmt_functor.h>
@@ -38,25 +40,128 @@ namespace transform {
 class StorageAccessAnalyzer : public StmtExprVisitor {
  private:
   enum class StorageType : int32_t { kGlobal = 0, kShared = 1, kLocal = 2, kOthers = 3 };
+  enum class RWMode { kRead, kWrite, kUnset };
+
+  void VisitExpr_(const VarNode* op) final {
+    if (rw_mode_ == RWMode::kRead) {
+      read_marker_.SetStorageAccessMarker(GetRef<Var>(op));
+    }
+    if (rw_mode_ == RWMode::kWrite) {
+      write_marker_.SetStorageAccessMarker(GetRef<Var>(op));
+    }
+  }
+  struct ReadScope {
+    ReadScope(StorageAccessAnalyzer* analyzer) : analyzer(analyzer) {}
+    void EnterWithScope() { analyzer->rw_mode_ = RWMode::kRead; }
+    void ExitWithScope() { analyzer->rw_mode_ = RWMode::kUnset; }
+    StorageAccessAnalyzer* analyzer;
+  };
+  struct WriteScope {
+    WriteScope(StorageAccessAnalyzer* analyzer) : analyzer(analyzer) {}
+    void EnterWithScope() { analyzer->rw_mode_ = RWMode::kWrite; }
+    void ExitWithScope() { analyzer->rw_mode_ = RWMode::kUnset; }
+    StorageAccessAnalyzer* analyzer;
+  };
 
   void VisitStmt_(const BufferStoreNode* op) final {
-    write_marker_.SetStorageAccessMarker(op->buffer);
-    StmtExprVisitor::VisitStmt_(op);
+    With<WriteScope> write_scope(this);
+    VisitExpr(op->buffer->data);
   }
   void VisitExpr_(const BufferLoadNode* op) final {
-    read_marker_.SetStorageAccessMarker(op->buffer);
-    StmtExprVisitor::VisitExpr_(op);
+    With<ReadScope> read_scope(this);
+    VisitExpr(op->buffer->data);
+  }
+  // Check opaque acccesses within the WMMA instructions.
+  void VisitExpr_(const CallNode* op) final {
+    if (op->op.same_as(builtin::tvm_fill_fragment())) {
+      With<WriteScope> write_scope(this);
+      VisitExpr(op->args[0]);
+    } else if (op->op.same_as(builtin::tvm_load_matrix_sync()) ||
+               op->op.same_as(builtin::tvm_store_matrix_sync())) {
+      {
+        With<WriteScope> write_scope(this);
+        VisitExpr(op->args[0]);
+      }
+      {
+        With<ReadScope> read_scope(this);
+        VisitExpr(op->args[5]);
+      }
+    } else if (op->op.same_as(builtin::tvm_mma_sync()) ||
+               op->op.same_as(builtin::tvm_bmma_sync())) {
+      {
+        With<WriteScope> write_scope(this);
+        VisitExpr(op->args[0]);
+      }
+      {
+        With<ReadScope> read_scope(this);
+        VisitExpr(op->args[2]);
+        VisitExpr(op->args[4]);
+        VisitExpr(op->args[6]);
+      }
+    } else if (op->op.same_as(builtin::ptx_mma()) || op->op.same_as(builtin::ptx_mma_sp())) {
+      {
+        With<ReadScope> read_scope(this);
+        VisitExpr(op->args[6]);
+        VisitExpr(op->args[8]);
+      }
+      {
+        With<WriteScope> write_scope(this);
+        VisitExpr(op->args[10]);
+      }
+    } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
+      {
+        With<WriteScope> write_scope(this);
+        VisitExpr(op->args[3]);
+      }
+      {
+        With<ReadScope> read_scope(this);
+        VisitExpr(op->args[5]);
+      }
+    } else if (op->op.same_as(builtin::mma_store())) {
+      {
+        With<WriteScope> write_scope(this);
+        VisitExpr(op->args[2]);
+      }
+      {
+        With<ReadScope> read_scope(this);
+        VisitExpr(op->args[3]);
+      }
+    } else if (op->op.same_as(builtin::mma_fill())) {
+      With<WriteScope> write_scope(this);
+      VisitExpr(op->args[1]);
+    } else if (op->op.same_as(builtin::ptx_cp_async())) {
+      {
+        With<WriteScope> write_scope(this);
+        VisitExpr(op->args[0]);
+      }
+      {
+        With<ReadScope> read_scope(this);
+        VisitExpr(op->args[0]);
+      }
+    } else {
+      return StmtExprVisitor::VisitExpr_(op);
+    }
   }
   class AccessMarker {
    public:
-    void SetStorageAccessMarker(const Buffer& buf) {
+    void SetStorageAccessMarker(const Var& var) {
       using runtime::StorageScope;
 
-      if (StorageScope::Create(buf.scope()) == StorageScope::Create("global")) {
+      const PointerTypeNode* ptr_type = var->type_annotation.as<PointerTypeNode>();
+      if (ptr_type == nullptr) {
+        return;
+      }
+      if (StorageScope::Create(ptr_type->storage_scope) == StorageScope::Create("global")) {
         bit_vector_[static_cast<int>(StorageType::kGlobal)] = true;
-      } else if (StorageScope::Create(buf.scope()) == StorageScope::Create("shared")) {
+      } else if (StorageScope::Create(ptr_type->storage_scope) == StorageScope::Create("shared")) {
         bit_vector_[static_cast<int>(StorageType::kShared)] = true;
-      } else if (StorageScope::Create(buf.scope()) == StorageScope::Create("local")) {
+      } else if (StorageScope::Create(ptr_type->storage_scope) == StorageScope::Create("local") ||
+                 StorageScope::Create(ptr_type->storage_scope) ==
+                     StorageScope::Create("wmma.matrix_a") ||
+                 StorageScope::Create(ptr_type->storage_scope) ==
+                     StorageScope::Create("wmma.matrix_b") ||
+                 StorageScope::Create(ptr_type->storage_scope) ==
+                     StorageScope::Create("wmma.accumulator")) {
         bit_vector_[static_cast<int>(StorageType::kLocal)] = true;
       } else {
         bit_vector_[static_cast<int>(StorageType::kOthers)] = true;
@@ -84,6 +189,7 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
    private:
     std::array<bool, static_cast<int>(StorageType::kOthers) + 1> bit_vector_ = {false};
   };
+  RWMode rw_mode_;
   AccessMarker read_marker_, write_marker_;
   std::pair<AccessMarker, AccessMarker> Analyze(const Stmt& stmt) {
     VisitStmt(stmt);
