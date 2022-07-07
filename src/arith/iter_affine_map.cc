@@ -1276,7 +1276,9 @@ IterSumExpr IterMapRewriter::PreprocessDividend(IterMapExpr dividend, PrimExpr o
     return IterSumExpr({split}, make_zero(split.dtype()));
   } else if (dividend->IsInstance<IterSumExprNode>()) {
     auto sum = Downcast<IterSumExpr>(dividend);
-    if (sum->args.size() <= 1) {
+    if (sum->args.empty()) {
+      return IterSumExpr();
+    } else if (sum->args.size() == 1) {
       return sum;
     }
     auto opt_fused = TryFuseIters(sum);
@@ -1552,6 +1554,7 @@ PrimExpr IterMapRewriter::VisitExpr_(const FloorDivNode* op) {
   if (!preprocessed.defined()) {
     return GetRef<PrimExpr>(op);
   }
+  ICHECK_EQ(preprocessed->args.size(), 1U);
   PrimExpr remainder = SplitFloorDivConst(preprocessed->args[0], preprocessed->base, b);
   if (!remainder.defined()) {
     return GetRef<PrimExpr>(op);
@@ -1637,6 +1640,7 @@ PrimExpr IterMapRewriter::VisitExpr_(const FloorModNode* op) {
     return GetRef<PrimExpr>(op);
   }
 
+  ICHECK_EQ(preprocessed->args.size(), 1U);
   PrimExpr remainder = SplitFloorModConst(preprocessed->args[0], preprocessed->base, b);
   if (!remainder.defined()) {
     return GetRef<PrimExpr>(op);
@@ -2159,7 +2163,9 @@ class InverseAffineIterMapTransformer {
    *        descending order of lower_factor.
    */
   void CheckFusePattern(const IterSumExpr sum_expr) {
-    ICHECK(sum_expr->args.size());
+    if (sum_expr->args.empty()) {
+      return;
+    }
     PrimExpr expected_scale = sum_expr->args.back()->scale;
     for (size_t i = sum_expr->args.size(); i > 0; i--) {
       ICHECK(analyzer_->CanProveEqual(sum_expr->args[i - 1]->scale, expected_scale));

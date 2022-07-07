@@ -24,6 +24,31 @@
 
 #include "codegen_cpu.h"
 
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/StringRef.h>
+#include <llvm/IR/Argument.h>
+#include <llvm/IR/Attributes.h>
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/CallingConv.h>
+#include <llvm/IR/Comdat.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/DIBuilder.h>
+#include <llvm/IR/DebugInfoMetadata.h>
+#include <llvm/IR/DebugLoc.h>
+#include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalVariable.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/MDBuilder.h>
+#include <llvm/IR/Metadata.h>
+#include <llvm/IR/Module.h>
+#if TVM_LLVM_VERSION >= 100
+#include <llvm/Support/Alignment.h>
+#endif
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/Transforms/Utils/ModuleUtils.h>
 #include <tvm/runtime/c_runtime_api.h>
 #include <tvm/runtime/module.h>
 #include <tvm/tir/analysis.h>
@@ -35,8 +60,14 @@
 
 #include "../func_registry_generator.h"
 #include "../metadata_utils.h"
+
 namespace tvm {
 namespace codegen {
+
+// Make these non-inline because of std::unique_ptr. See comment in
+// codegen_llvm.cc for more information.
+CodeGenCPU::CodeGenCPU() = default;
+CodeGenCPU::~CodeGenCPU() = default;
 
 void CodeGenCPU::Init(const std::string& module_name, llvm::TargetMachine* tm,
                       llvm::LLVMContext* ctx, bool system_lib, bool dynamic_lookup,
@@ -160,64 +191,68 @@ void CodeGenCPU::AddFunction(const PrimFunc& f) {
     export_system_symbols_.emplace_back(
         std::make_pair(global_symbol.value().operator std::string(), function_));
   }
-  AddDebugInformation(function_);
+  AddDebugInformation(f, function_);
 }
 
 // Following Glow |DebugInfo::generateFunctionDebugInfo|, https://git.io/fjadv
-void CodeGenCPU::AddDebugInformation(llvm::Function* function) {
+void CodeGenCPU::AddDebugInformation(PrimFunc f_tir, llvm::Function* f_llvm) {
 #if TVM_LLVM_VERSION >= 50 && TVM_LLVM_VERSION < 70
-  ICHECK(!function->getSubprogram());
+  ICHECK(!f_llvm->getSubprogram());
   llvm::SmallVector<llvm::Metadata*, 4> paramTys;
-  llvm::DIType* returnTy =
-      getDebugType(builder_.get(), dbg_info_->di_builder_.get(), function->getReturnType());
+  // Functions in TIR can only return void or an int.
+  ICHECK(f_llvm->getReturnType() == t_void_ || f_llvm->getReturnType() == t_int_)
+      << "Unexpected return type";
+  auto ret_type_tir = f_llvm->getReturnType() == t_int_ ? DataType::Int(32) : DataType::Void();
+  llvm::DIType* returnTy = GetDebugType(ret_type_tir, f_llvm->getReturnType());
   paramTys.push_back(returnTy);
-  for (size_t i = 0; i < function->arg_size(); ++i) {
-    paramTys.push_back(getDebugType(builder_.get(), dbg_info_->di_builder_.get(),
-                                    function->getFunctionType()->getParamType(i)));
+  for (size_t i = 0; i < f_llvm->arg_size(); ++i) {
+    paramTys.push_back(
+        GetDebugType(GetType(f_tir->args[i]), f_llvm->getFunctionType()->getParamType(i)));
   }
   auto* DIFunctionTy = dbg_info_->di_builder_->createSubroutineType(
       dbg_info_->di_builder_->getOrCreateTypeArray(paramTys));
 
 #if TVM_LLVM_VERSION >= 80
   auto* DIFunction = dbg_info_->di_builder_->createFunction(
-      dbg_info_->file_, function->getName(), "", dbg_info_->file_, 0 /* line number */,
-      DIFunctionTy, false /* internal linkage */);
+      /*Scope=*/dbg_info_->file_, /*Name=*/f_llvm->getName(), /*LinkageName=*/"",
+      /*File=*/dbg_info_->file_, /*LineNo=*/0, /*Ty=*/DIFunctionTy,
+      /*ScopeLine=*/0);
 #else
   auto* DIFunction = dbg_info_->di_builder_->createFunction(
-      dbg_info_->file_, function->getName(), "", dbg_info_->file_, 0 /* line number */,
-      DIFunctionTy, false, /* internal linkage */
-      true, 0 /* line number */, llvm::DINode::FlagPrototyped, true /* isOptimized */);
+      /*Scope=*/dbg_info_->file_, /*Name=*/f_llvm->getName(), /*LinkageName=*/"",
+      /*File=*/dbg_info_->file_, /*LineNo=*/0, /*Ty=*/DIFunctionTy,
+      /*isLocalToUnit=*/false, /*isDefinition=*/true, /*ScopeLine=*/0,
+      /*Flags=*/llvm::DINode::FlagPrototyped, /*isOptimized=*/true);
 #endif
 
   ICHECK(DIFunction);
-  function->setSubprogram(DIFunction);
-  ICHECK_EQ(function->getSubprogram(), DIFunction);
+  f_llvm->setSubprogram(DIFunction);
+  ICHECK_EQ(f_llvm->getSubprogram(), DIFunction);
 
-  IRBuilder builder(&function->getEntryBlock());
-  if (!function->getEntryBlock().empty()) {
-    builder.SetInsertPoint(&function->getEntryBlock().front());
+  IRBuilder builder(&f_llvm->getEntryBlock());
+  if (!f_llvm->getEntryBlock().empty()) {
+    builder.SetInsertPoint(&f_llvm->getEntryBlock().front());
   }
   llvm::DebugLoc DL;
   builder.SetCurrentDebugLocation(DL);
-  for (size_t i = 0; i < function->arg_size(); ++i) {
-    auto* paramAlloca = builder.CreateAlloca(function->getFunctionType()->getParamType(i));
+  for (size_t i = 0; i < f_llvm->arg_size(); ++i) {
+    auto* paramAlloca = builder.CreateAlloca(f_llvm->getFunctionType()->getParamType(i));
     std::string paramName = "arg" + std::to_string(i + 1);
     auto param = dbg_info_->di_builder_->createParameterVariable(
         DIFunction, paramName, i + 1, dbg_info_->file_, 0,
-        getDebugType(builder_.get(), dbg_info_->di_builder_.get(),
-                     function->getFunctionType()->getParamType(i)),
-        /* alwaysPreserve */ true);
-    auto* store = builder.CreateStore(function->arg_begin() + i, paramAlloca);
+        GetDebugType(GetType(f_tir->args[i]), f_llvm->getFunctionType()->getParamType(i)),
+        /*alwaysPreserve=*/true);
+    auto* store = builder.CreateStore(f_llvm->arg_begin() + i, paramAlloca);
     dbg_info_->di_builder_->insertDeclare(paramAlloca, param,
                                           dbg_info_->di_builder_->createExpression(),
                                           llvm::DebugLoc::get(0, 0, DIFunction), store);
   }
-  dbg_info_->di_builder_->finalizeSubprogram(function->getSubprogram());
-  auto* scope = function->getSubprogram();
+  dbg_info_->di_builder_->finalizeSubprogram(f_llvm->getSubprogram());
+  auto* scope = f_llvm->getSubprogram();
   if (!scope) {
     return;
   }
-  for (auto& BB : *function) {
+  for (auto& BB : *f_llvm) {
     for (auto& I : BB) {
       if (I.getDebugLoc()) {
         continue;
@@ -228,24 +263,25 @@ void CodeGenCPU::AddDebugInformation(llvm::Function* function) {
 #endif
 }
 
-llvm::DIType* CodeGenCPU::getDebugType(IRBuilder* builder, llvm::DIBuilder* di_builder,
-                                       llvm::Type* ty) {
-  if (ty == builder->getVoidTy()) {
+llvm::DIType* CodeGenCPU::GetDebugType(const Type& ty_tir, llvm::Type* ty_llvm) {
+  if (ty_llvm == t_void_) {
     return nullptr;
-  } else if (ty == builder->getFloatTy()) {
-    return di_builder->createBasicType("float", 32, llvm::dwarf::DW_ATE_float);
-  } else if (ty == builder->getInt8Ty()) {
-    return di_builder->createBasicType("int8", 8, llvm::dwarf::DW_ATE_signed);
-  } else if (ty == builder->getInt32Ty()) {
-    return di_builder->createBasicType("int32", 32, llvm::dwarf::DW_ATE_signed);
-  } else if (ty->isPointerTy()) {
-    return di_builder->createPointerType(
-        getDebugType(builder, di_builder, ty->getPointerElementType()),
-        ty->getPrimitiveSizeInBits());
+  } else if (ty_llvm == llvm::Type::getFloatTy(*ctx_)) {
+    return dbg_info_->di_builder_->createBasicType("float", 32, llvm::dwarf::DW_ATE_float);
+  } else if (ty_llvm == t_int8_) {
+    return dbg_info_->di_builder_->createBasicType("int8", 8, llvm::dwarf::DW_ATE_signed);
+  } else if (ty_llvm == t_int32_) {
+    return dbg_info_->di_builder_->createBasicType("int32", 32, llvm::dwarf::DW_ATE_signed);
+  } else if (ty_llvm->isPointerTy()) {
+    auto* ptr_type = ty_tir.as<PointerTypeNode>();
+    ICHECK(ptr_type != nullptr) << "Got LLVM pointer type from non-pointer IR type: " << ty_tir;
+    Type elem_type = ptr_type->element_type;
+    return dbg_info_->di_builder_->createPointerType(
+        GetDebugType(elem_type, GetLLVMType(elem_type)), ty_llvm->getPrimitiveSizeInBits());
   } else {
     std::string type_str;
     llvm::raw_string_ostream rso(type_str);
-    ty->print(rso);
+    ty_llvm->print(rso);
     LOG(FATAL) << "Unknown LLVM type:" << rso.str();
   }
   return nullptr;
@@ -1495,6 +1531,11 @@ void CodeGenCPU::VisitStmt_(const ForNode* op) {
     LOG(FATAL) << "cannot handle for type " << op->kind;
   }
 }
+
+TVM_REGISTER_GLOBAL("tvm.codegen.llvm.target_cpu")
+    .set_body([](const TVMArgs& targs, TVMRetValue* rv) {
+      *rv = static_cast<void*>(new CodeGenCPU());
+    });
 
 }  // namespace codegen
 }  // namespace tvm
