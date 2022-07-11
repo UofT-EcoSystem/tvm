@@ -191,6 +191,12 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
                bit_vector_[static_cast<int>(StorageType::kOthers)]) &&
              bit_vector_[static_cast<int>(StorageType::kGlobal)];
     }
+    bool OnlyLocalAccesses() const {
+      return !(bit_vector_[static_cast<int>(StorageType::kGlobal)] ||
+               bit_vector_[static_cast<int>(StorageType::kShared)] ||
+               bit_vector_[static_cast<int>(StorageType::kOthers)]) &&
+             bit_vector_[static_cast<int>(StorageType::kLocal)];
+    }
     bool OnlyLocalOrSharedAccesses() const {
       return !(bit_vector_[static_cast<int>(StorageType::kGlobal)] ||
                bit_vector_[static_cast<int>(StorageType::kOthers)]) &&
@@ -344,11 +350,19 @@ class LocalPadder : public StmtExprMutator {
     StorageAccessAnalyzer::AccessMarker read_marker, write_marker;
     std::tie(read_marker, write_marker) = StorageAccessAnalyzer().Analyze(op->then_case);
 
-    if (read_marker.NoAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
-      if (init_verified_by_outer_stmts_) {
-        return StmtExprMutator::VisitStmt(op->then_case);
-      }
-      return StmtExprMutator::VisitStmt_(op);
+    // Remove the predicates, while preserving the correctness. By "correctness", we refer to
+    //
+    // - The padded value does not affect the computed results in the global memory.
+    // - There is no out-of-boundary accesses.
+    // - There is no race condition.
+
+    // 
+
+    if (read_marker.NoAccesses() && write_marker.OnlyLocalAccesses()) {
+      // In the case when we are initializing 
+
+
+
     } else if (read_marker.OnlyGlobalAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
       if (!init_checker_.init_constexpr_) {
         return StmtExprMutator::VisitStmt_(op);
