@@ -38,7 +38,6 @@ class MatMulNNOriginalModule:
     """
 
     # fmt: off
-    # pylint: disable=invalid-name, no-member, missing-function-docstring, no-self-argument, too-many-locals, too-many-nested-blocks, too-many-branches, too-few-public-methods, line-too-long
     @T.prim_func
     def main(A: T.Buffer[(960, 770), "float32"], B: T.Buffer[(770, 2304), "float32"], C: T.Buffer[(960, 2304), "float32"]) -> None:
         C_local = T.alloc_buffer([960, 2304], dtype="float32", scope="local")
@@ -94,7 +93,6 @@ class MatMulNNOriginalModule:
                             T.writes(C[v0, v1])
                             C[v0, v1] = C_local[v0, v1]
 
-    # pylint: enable=invalid-name, no-member, missing-function-docstring, no-self-argument, too-many-locals, too-many-nested-blocks, too-many-branches, too-few-public-methods, line-too-long
     # fmt: on
 
 
@@ -105,7 +103,6 @@ class MatMulNNExpectedModule:
     """
 
     # fmt: off
-    # pylint: disable=invalid-name, no-member, missing-function-docstring, no-self-argument, too-many-locals, too-many-nested-blocks, too-many-branches, too-few-public-methods, line-too-long
     @T.prim_func
     def main(A: T.Buffer[(960, 770), "float32"], B: T.Buffer[(770, 2304), "float32"], C: T.Buffer[(960, 2304), "float32"]) -> None:
         C_local = T.alloc_buffer([960, 2304], dtype="float32", scope="local")
@@ -159,7 +156,6 @@ class MatMulNNExpectedModule:
                             T.writes(C[v0, v1])
                             C[v0, v1] = C_local[v0, v1]
 
-    # pylint: enable=invalid-name, no-member, missing-function-docstring, no-self-argument, too-many-locals, too-many-nested-blocks, too-many-branches, too-few-public-methods, line-too-long
     # fmt: on
 
 
