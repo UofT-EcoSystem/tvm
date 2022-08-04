@@ -56,6 +56,11 @@ TVM_DLL const Op& reinterpret();
 TVM_DLL const Op& likely();
 
 /*!
+ * \brief Marks a condition as having on effect on the region size.
+ */
+TVM_DLL const Op& no_effect_on_region_size();
+
+/*!
  * \brief Bitwise and operator.
  */
 TVM_DLL const Op& bitwise_and();

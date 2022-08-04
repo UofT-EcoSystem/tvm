@@ -95,17 +95,62 @@ NDIntSet NDIntSetEval(Region region, PrimExpr predicate,
   return support::NDIntSetEval(support::NDIntSetFromRegion(region), dom_map);
 }
 
+/*! \brief Decompose a predicate that is made up of AndNode's into sub-expressions. */
+std::vector<PrimExpr> DecomposePredicate(const PrimExpr& predicate) {
+  std::vector<PrimExpr> predicate_subexprs;
+  std::function<void(const PrimExpr&)> decompose;
+  decompose = [&predicate_subexprs, &decompose](const PrimExpr& cond) {
+    if (const AndNode* op = cond.as<AndNode>()) {
+      decompose(op->a);
+      decompose(op->b);
+    } else {
+      predicate_subexprs.push_back(cond);
+    }
+  };
+  decompose(predicate);
+  CHECK(!predicate_subexprs.empty());
+  return predicate_subexprs;
+}
+
+/*! \brief Flatten an array of subexpressions into predicate. */
+PrimExpr FlattenPredicateSubExprs(const Array<PrimExpr>& predicate_subexprs,
+                                  const int ignore_idx = -1) {
+  CHECK(!predicate_subexprs.empty());
+  PrimExpr ret = predicate_subexprs.front();
+  for (size_t subexpr_idx = 0; subexpr_idx < predicate_subexprs.size(); ++subexpr_idx) {
+    if (subexpr_idx == static_cast<size_t>(ignore_idx)) {
+      continue;
+    }
+    ret = ret && predicate_subexprs[subexpr_idx];
+  }
+  return ret;
+}
+
+inline bool CheckSameAccessRegion(const Region& lhs, const Region& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (size_t region_idx = 0; region_idx < lhs.size(); ++region_idx) {
+    if (!StructuralEqual()(lhs[region_idx], rhs[region_idx])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /*!
  * \brief Collect the access region of each buffer.
  * \note The param buffer regions will not be collected.
  */
 class BufferAccessRegionCollector : public StmtExprVisitor {
  public:
-  static std::unordered_map<Buffer, Region, ObjectPtrHash, ObjectPtrEqual> Collect(
-      const PrimFunc& f) {
+  static std::pair<std::unordered_map<Buffer, Region, ObjectPtrHash, ObjectPtrEqual>,
+                   std::unordered_set<PrimExpr, ObjectPtrHash, ObjectPtrEqual>>
+  Collect(const PrimFunc& f) {
     BufferAccessRegionCollector collector;
     collector(f->body);
-    return std::move(collector.buffer_access_region_);
+    return std::make_pair(collector.buffer_access_region_,
+                          collector.no_effect_on_region_size_subexprs_);
   }
 
  private:
@@ -289,6 +334,20 @@ class BufferAccessRegionCollector : public StmtExprVisitor {
       // Step 2. Relax the access region
       NDIntSet nd_int_set =
           NDIntSetEval(buffer_region->region, predicate_in_scope, dom_map_, &dom_analyzer_);
+      Region narrowed_buffer_region = SimplifyAndNarrowBufferRegionFromNDIntSet(
+          nd_int_set, buffer->shape, &dom_analyzer_, ancestor_loops_);
+
+      std::vector<PrimExpr> predicate_subexprs = DecomposePredicate(predicate_in_scope);
+      for (size_t subexpr_i = 0; subexpr_i < predicate_subexprs.size(); ++subexpr_i) {
+        PrimExpr flattened_predicate = FlattenPredicateSubExprs(predicate_subexprs, subexpr_i);
+        NDIntSet nd_int_set_wo_subexpr =
+            NDIntSetEval(buffer_region->region, flattened_predicate, dom_map_, &dom_analyzer_);
+        Region narrowed_buffer_region_wo_subexpr = SimplifyAndNarrowBufferRegionFromNDIntSet(
+            nd_int_set_wo_subexpr, buffer->shape, &dom_analyzer_, ancestor_loops_);
+        if (!CheckSameAccessRegion(narrowed_buffer_region, narrowed_buffer_region_wo_subexpr)) {
+          continue;
+        }
+      }
       // Step 3. Restore the non-relaxed ancestor loops domain
       for (size_t i = 0; i < n_ancestor_loops; ++i) {
         const VarNode* v = ancestor_loops_[i]->loop_var.get();
@@ -358,6 +417,8 @@ class BufferAccessRegionCollector : public StmtExprVisitor {
   std::unordered_map<Buffer, NDIntSet, ObjectPtrHash, ObjectPtrEqual> relaxed_accesses_;
   /*! \brief The map from Buffer to it entire access region, used for returning. */
   std::unordered_map<Buffer, Region, ObjectPtrHash, ObjectPtrEqual> buffer_access_region_;
+  /*! \brief The set of predicates that do not affect the buffer size. */
+  std::unordered_set<PrimExpr, ObjectPtrHash, ObjectPtrEqual> no_effect_on_region_size_subexprs_;
   /*! \brief The map from Buffer to it's access regions annotated by current block. */
   std::unordered_map<Buffer, std::vector<BufferRegion>, ObjectPtrHash, ObjectPtrEqual>
       access_annotations_;
@@ -586,7 +647,10 @@ PrimFunc CompactBufferAllocation(PrimFunc f) {
   // Only apply this pass to TIR that is not from TE schedules
   if (!IsFromLegacyTESchedule(f)) {
     PrimFuncNode* fptr = f.CopyOnWrite();
-    std::unordered_map<Buffer, Region, ObjectPtrHash, ObjectPtrEqual> region =
+    std::unordered_map<Buffer, Region, ObjectPtrHash, ObjectPtrEqual> region;
+    std::unordered_set<PrimExpr, ObjectPtrHash, ObjectPtrEqual>
+        no_effect_on_region_size_predicate_subexprs;
+    std::tie(region, no_effect_on_region_size_predicate_subexprs) =
         BufferAccessRegionCollector::Collect(f);
     std::unordered_map<Buffer, StorageAlignAnnotation, ObjectPtrHash, ObjectPtrEqual>
         storage_align = StorageAlignCollector::Collect(f);

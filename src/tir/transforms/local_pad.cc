@@ -216,6 +216,8 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
     VisitStmt(stmt);
     return std::make_pair(read_marker_, write_marker_);
   }
+  std::multiset<const BlockRealizeNode*> GetConsumers(
+      const VarNode* var, const std::multiset<const BlockRealizeNode*>& blocks) {}
 
   friend class LocalPadder;
 };
@@ -244,9 +246,6 @@ class LocalPadder : public StmtExprMutator {
     // - There is no out-of-boundary accesses.
     // - There is no race condition.
 
-    if (!op->predicate.defined()) {
-      return StmtExprMutator::VisitStmt_(op);
-    }
     // First, decompose the condition. Since a predicate is usually in the form of
     //
     //     a1 < c1 && a2 < c2 ...
@@ -256,7 +255,7 @@ class LocalPadder : public StmtExprMutator {
     std::vector<size_t> inlinable_indices;
     std::vector<size_t> residual_indices;
 
-    if (read_marker.NoAccesses() && write_marker.OnlyLocalAccesses()) {
+    if (write_marker.OnlyLocalAccesses()) {
       // No memory reads but only local writes, common pattern for initialization.
       //
       //    A_local[local_index] = 0.f;
@@ -265,8 +264,12 @@ class LocalPadder : public StmtExprMutator {
         // evaluated to false, the same local memory location will be rejected by the one that is
         // structurally similar in the write-back block anyway.
         const PrimExpr& predicate = predicates[i];
-      }
-    }
+
+        // bool predicate_is_removable = true;
+        // for (const BlockRealizeNode* block : blocks_) {
+        // }
+      }  // for (i in [0, predicates.size()))
+    }    // if (write_marker.OnlyLocalAccesses())
 
     return StmtExprMutator::VisitStmt_(op);
   }

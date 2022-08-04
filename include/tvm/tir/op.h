@@ -693,6 +693,13 @@ TVM_DLL PrimExpr if_then_else(PrimExpr cond, PrimExpr true_value, PrimExpr false
  */
 TVM_DLL PrimExpr likely(PrimExpr cond, Span span = Span());
 /*!
+ * \brief Mark condition as having on effect on the region size.
+ * \param cond The condition
+ * \param span The location of this operation in the source.
+ * \return The marked expression.
+ */
+TVM_DLL PrimExpr no_effect_on_region_size(PrimExpr cond, Span span = Span());
+/*!
  * \brief Calculate power(x, y)
  * \param x The left operand.
  * \param y The right operand.
