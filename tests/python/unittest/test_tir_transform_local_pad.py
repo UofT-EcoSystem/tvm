@@ -181,8 +181,6 @@ def postprocess(mod):
     return mod
 
 
-@tvm.testing.requires_gpu
-@tvm.testing.requires_cuda
 def test_dense_local_padding():
     """
     Test that local padding is delivering the correct compute outcome.
@@ -192,6 +190,7 @@ def test_dense_local_padding():
     mod = preprocess(mod)
     mod = LocalPad(True)(mod)
     mod = VectorizeLoop(False, True)(mod)
+    mod = postprocess(mod)
     print(mod)
     expected_mod = MatMulNNExpectedModule
     expected_mod = preprocess(expected_mod)

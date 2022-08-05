@@ -306,6 +306,21 @@ struct FragmentInfo {
  */
 std::unordered_map<const VarNode*, FragmentInfo> GetTensorCoreFragmentInfo(const Stmt& stmt);
 
+/*!
+ * \brief Decompose a predicate that is made up of AndNode's into sub-expressions.
+ * \param predicate The predicate to decompose.
+ * \return The decomposed subexpressions of the predicate.
+ */
+std::vector<PrimExpr> DecomposePredicate(const PrimExpr& predicate);
+
+/*!
+ * \brief Flatten an array of subexpressions into predicate.
+ * \param predicate_subexprs Array of predicate subexpressions.
+ * \return The flattened predicate.
+ */
+PrimExpr FlattenPredicateSubExprs(const Array<PrimExpr>& predicate_subexprs,
+                                  const int ignore_idx = -1);
+
 }  // namespace tir
 }  // namespace tvm
 #endif  // TVM_TIR_TRANSFORMS_IR_UTILS_H_

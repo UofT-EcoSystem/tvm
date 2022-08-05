@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "../../runtime/thread_storage_scope.h"
+#include "ir_utils.h"
 
 namespace tvm {
 namespace tir {
@@ -71,91 +72,6 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
     StorageAccessAnalyzer* analyzer_;
   };
 
-  void VisitStmt_(const BufferStoreNode* op) final {
-    {
-      With<WriteScope> write_scope(this);
-      VisitExpr(op->buffer->data);
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-  void VisitExpr_(const BufferLoadNode* op) final {
-    {
-      With<ReadScope> read_scope(this);
-      VisitExpr(op->buffer->data);
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-  // Check opaque accesses within the WMMA instructions.
-  void VisitExpr_(const CallNode* op) final {
-    if (op->op.same_as(builtin::tvm_fill_fragment())) {
-      With<WriteScope> write_scope(this);
-      VisitExpr(op->args[0]);
-    } else if (op->op.same_as(builtin::tvm_load_matrix_sync()) ||
-               op->op.same_as(builtin::tvm_store_matrix_sync())) {
-      {
-        With<WriteScope> write_scope(this);
-        VisitExpr(op->args[0]);
-      }
-      {
-        With<ReadScope> read_scope(this);
-        VisitExpr(op->args[5]);
-      }
-    } else if (op->op.same_as(builtin::tvm_mma_sync()) ||
-               op->op.same_as(builtin::tvm_bmma_sync())) {
-      {
-        With<WriteScope> write_scope(this);
-        VisitExpr(op->args[0]);
-      }
-      {
-        With<ReadScope> read_scope(this);
-        VisitExpr(op->args[2]);
-        VisitExpr(op->args[4]);
-        VisitExpr(op->args[6]);
-      }
-    } else if (op->op.same_as(builtin::ptx_mma()) || op->op.same_as(builtin::ptx_mma_sp())) {
-      {
-        With<ReadScope> read_scope(this);
-        VisitExpr(op->args[6]);
-        VisitExpr(op->args[8]);
-      }
-      {
-        With<WriteScope> write_scope(this);
-        VisitExpr(op->args[10]);
-      }
-    } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
-      {
-        With<WriteScope> write_scope(this);
-        VisitExpr(op->args[3]);
-      }
-      {
-        With<ReadScope> read_scope(this);
-        VisitExpr(op->args[5]);
-      }
-    } else if (op->op.same_as(builtin::mma_store())) {
-      {
-        With<WriteScope> write_scope(this);
-        VisitExpr(op->args[2]);
-      }
-      {
-        With<ReadScope> read_scope(this);
-        VisitExpr(op->args[3]);
-      }
-    } else if (op->op.same_as(builtin::mma_fill())) {
-      With<WriteScope> write_scope(this);
-      VisitExpr(op->args[1]);
-    } else if (op->op.same_as(builtin::ptx_cp_async())) {
-      {
-        With<WriteScope> write_scope(this);
-        VisitExpr(op->args[0]);
-      }
-      {
-        With<ReadScope> read_scope(this);
-        VisitExpr(op->args[0]);
-      }
-    } else {
-      return StmtExprVisitor::VisitExpr_(op);
-    }
-  }
   class AccessMarker {
    public:
     void SetStorageAccessMarker(const Var& var) {
@@ -212,8 +128,19 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
   RWMode rw_mode_;
   AccessMarker read_marker_, write_marker_;
   std::multiset<const VarNode*> read_vars_, write_vars_;
-  std::pair<AccessMarker, AccessMarker> Analyze(const Stmt& stmt) {
-    VisitStmt(stmt);
+  std::pair<AccessMarker, AccessMarker> Analyze(const BlockRealizeNode* op) {
+    {
+      With<ReadScope> read_scope(this);
+      for (const BufferRegion& read_buffer : op->block->reads) {
+        VisitExpr(read_buffer->buffer->data);
+      }
+    }
+    {
+      With<WriteScope> write_scope(this);
+      for (const BufferRegion& write_buffer : op->block->writes) {
+        VisitExpr(write_buffer->buffer->data);
+      }
+    }
     return std::make_pair(read_marker_, write_marker_);
   }
   std::multiset<const BlockRealizeNode*> GetConsumers(
@@ -224,7 +151,8 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
 
 class LocalPadder : public StmtExprMutator {
  public:
-  LocalPadder(std::multiset<const BlockRealizeNode*> blocks) : blocks_(blocks) {}
+  LocalPadder(std::unordered_set<BlockRealize, ObjectPtrHash, ObjectPtrEqual>&& blocks)
+      : blocks_(std::move(blocks)) {}
 
  private:
   Stmt VisitStmt_(const BlockRealizeNode* op) final {
@@ -232,7 +160,7 @@ class LocalPadder : public StmtExprMutator {
       return StmtExprMutator::VisitStmt_(op);
     }
     StorageAccessAnalyzer::AccessMarker read_marker, write_marker;
-    std::tie(read_marker, write_marker) = StorageAccessAnalyzer().Analyze(op->block->body);
+    std::tie(read_marker, write_marker) = StorageAccessAnalyzer().Analyze(op);
 
     // Remove and/or Inline the predicates, while preserving the correctness, where by "inline", we
     // refer to the following transformation:
@@ -273,23 +201,8 @@ class LocalPadder : public StmtExprMutator {
 
     return StmtExprMutator::VisitStmt_(op);
   }
-  std::vector<PrimExpr> DecomposePredicate(const PrimExpr& predicate) const {
-    std::vector<PrimExpr> predicates;
-    std::function<void(const PrimExpr&)> decompose;
-    decompose = [&predicates, &decompose](const PrimExpr& cond) {
-      if (const AndNode* op = cond.as<AndNode>()) {
-        decompose(op->a);
-        decompose(op->b);
-      } else {
-        predicates.push_back(cond);
-      }
-    };
-    decompose(predicate);
-    CHECK(!predicates.empty());
-    return predicates;
-  }
 
-  std::multiset<const BlockRealizeNode*> blocks_;
+  std::unordered_set<BlockRealize, ObjectPtrHash, ObjectPtrEqual> blocks_;
   // Stmt VisitStmt_(const IfThenElseNode* op) final {
   //   if (!is_no_op(op->else_case)) {
   //     return StmtExprMutator::VisitStmt_(op);
@@ -397,10 +310,10 @@ class LocalPadder : public StmtExprMutator {
 
 Stmt LocalPadTransform(Stmt stmt) {
   // Record all the blocks, used for tracing producer-consumer relationship.
-  std::multiset<const BlockRealizeNode*> blocks;
+  std::unordered_set<BlockRealize, ObjectPtrHash, ObjectPtrEqual> blocks;
   PostOrderVisit(stmt, [&blocks](const ObjectRef& obj_ref) {
     if (const BlockRealizeNode* op = obj_ref.as<BlockRealizeNode>()) {
-      blocks.insert(op);
+      blocks.insert(GetRef<BlockRealize>(op));
     }
   });
   LocalPadder local_padder(std::move(blocks));

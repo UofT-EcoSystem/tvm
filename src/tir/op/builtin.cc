@@ -51,7 +51,7 @@ TIR_DEFINE_BUILTIN_FUNC(likely)
     .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kExprAnnotation))
     .set_attr<TVectorizable>("TVectorizable", true);
 
-TIR_DEFINE_BUILTIN_FUNC(no_effect_on_region_size)
+TIR_DEFINE_BUILTIN_FUNC(affect_region_size)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kExprAnnotation))
     .set_attr<TVectorizable>("TVectorizable", true);
