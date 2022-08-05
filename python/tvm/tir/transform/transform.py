@@ -156,6 +156,11 @@ def LiftAttrScope(attr_key: str):
 def LocalPad(enable_local_pad: bool = False):
     """Pad tensors by the size of the local workspace.
 
+    Parameters
+    ----------
+    enable_local_pad : bool
+        Whether local padding has been enabled.
+
     Returns
     -------
     fpass : tvm.transform.Pass
@@ -175,7 +180,7 @@ def LoopPartition():
     return _ffi_api.LoopPartition()  # type: ignore
 
 
-def VectorizeLoop(enable_vectorize: bool = True, enable_local_pad: bool = False):
+def VectorizeLoop(enable_vectorize: bool = True):
     """Lower vectorization loops.
 
     Parameters
@@ -189,7 +194,7 @@ def VectorizeLoop(enable_vectorize: bool = True, enable_local_pad: bool = False)
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.VectorizeLoop(enable_vectorize, enable_local_pad)  # type: ignore
+    return _ffi_api.VectorizeLoop(enable_vectorize)  # type: ignore
 
 
 def InjectVirtualThread():
@@ -724,7 +729,7 @@ def ConvertBlocksToOpaque():
     return _ffi_api.ConvertBlocksToOpaque()  # type: ignore
 
 
-def CompactBufferAllocation():
+def CompactBufferAllocation(enable_local_pad: bool = False):
     """Compact the buffer access region. by removing the buffer regions
     that are not accessed, i.e. narrowing the buffer shape and adjust
     the access region if necessary.
@@ -760,13 +765,18 @@ def CompactBufferAllocation():
                 for j in range(0, 16):
                     C[i, j] = B[0, j] + 1
 
+    Parameters
+    ----------
+    enable_local_pad : bool
+        Whether local padding has been enabled.
+
     Returns
     -------
     fpass : tvm.transform.Pass
         The result pass
 
     """
-    return _ffi_api.CompactBufferAllocation()  # type: ignore
+    return _ffi_api.CompactBufferAllocation(enable_local_pad)  # type: ignore
 
 
 def LowerMatchBuffer():
