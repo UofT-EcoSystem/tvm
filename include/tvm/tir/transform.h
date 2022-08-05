@@ -128,12 +128,10 @@ TVM_DLL Pass LoopPartition();
  * \brief Lower vectorization loops.
  *
  * \param enable_vectorize  Whether vectorization is enabled.
- * \param enable_local_pad  Whether local padding is enabled. Local padding can affect
- *                          how vectorization is made.
  *
  * \return The pass.
  */
-TVM_DLL Pass VectorizeLoop(bool enable_vectorize = true, bool enable_local_pad = false);
+TVM_DLL Pass VectorizeLoop(bool enable_vectorize = true);
 
 /*!
  * \brief Inject virtual thread loops.
@@ -452,10 +450,10 @@ TVM_DLL Pass ConvertBlocksToOpaque();
  *
  *  \endcode
  *
- *
+ * \param enable_local_pad Whether local padding is enabled in the downstream.
  * \return The pass.
  */
-TVM_DLL Pass CompactBufferAllocation();
+TVM_DLL Pass CompactBufferAllocation(bool enable_local_pad = false);
 
 /*!
  * This pass legalizes packed calls by wrapping their arguments into TVMValues

@@ -453,10 +453,11 @@ class BufferCompactor : public StmtExprMutator {
   static Stmt Compact(
       const PrimFunc& f,
       const std::unordered_map<Buffer, Region, ObjectPtrHash, ObjectPtrEqual>& regions,
+      const std::unordered_map<Buffer, StorageAlignAnnotation, ObjectPtrHash, ObjectPtrEqual>&
+          storage_align,
       std::unordered_map<BlockRealize, PrimExpr, ObjectPtrHash, ObjectPtrEqual>&&
           block_predicate_with_annotations,
-      const std::unordered_map<Buffer, StorageAlignAnnotation, ObjectPtrHash, ObjectPtrEqual>&
-          storage_align) {
+      bool enable_local_pad) {
     std::unordered_map<Buffer, BufferAllocInfo, ObjectPtrHash, ObjectPtrEqual> buffer_info;
 
     for (const auto& kv : regions) {
@@ -477,7 +478,8 @@ class BufferCompactor : public StmtExprMutator {
       }
       buffer_info.emplace(buffer, std::move(buffer_alloc_info));
     }
-    BufferCompactor compactor(std::move(buffer_info), std::move(block_predicate_with_annotations));
+    BufferCompactor compactor(std::move(buffer_info), std::move(block_predicate_with_annotations),
+                              enable_local_pad);
     Stmt stmt = compactor(f->body);
     return stmt;
   }
@@ -508,9 +510,11 @@ class BufferCompactor : public StmtExprMutator {
   BufferCompactor(
       std::unordered_map<Buffer, BufferAllocInfo, ObjectPtrHash, ObjectPtrEqual>&& buffer_info,
       std::unordered_map<BlockRealize, PrimExpr, ObjectPtrHash, ObjectPtrEqual>&&
-          block_predicate_with_annotations)
+          block_predicate_with_annotations,
+      bool enable_local_pad)
       : buffer_info_(std::move(buffer_info)),
-        block_predicate_with_annotations_(std::move(block_predicate_with_annotations)) {}
+        block_predicate_with_annotations_(std::move(block_predicate_with_annotations)),
+        enable_local_pad_(enable_local_pad) {}
 
   Stmt VisitStmt_(const BufferStoreNode* _op) final {
     BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(_op));
@@ -527,6 +531,9 @@ class BufferCompactor : public StmtExprMutator {
   }
 
   Stmt VisitStmt_(const BlockRealizeNode* op) final {
+    if (!enable_local_pad_) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
     BlockRealize ret = Downcast<BlockRealize>(StmtExprMutator::VisitStmt_(op));
     auto it = block_predicate_with_annotations_.find(GetRef<BlockRealize>(op));
     if (it == block_predicate_with_annotations_.end()) {
@@ -653,9 +660,11 @@ class BufferCompactor : public StmtExprMutator {
   /*! \brief The map form BlockRealize to its annotated predicate. */
   std::unordered_map<BlockRealize, PrimExpr, ObjectPtrHash, ObjectPtrEqual>&&
       block_predicate_with_annotations_;
+  /*! \brief Whether local padding has been enabled. */
+  bool enable_local_pad_;
 };
 
-PrimFunc CompactBufferAllocation(PrimFunc f) {
+PrimFunc CompactBufferAllocation(PrimFunc f, bool enable_local_pad) {
   // Only apply this pass to TIR that is not from TE schedules
   if (!IsFromLegacyTESchedule(f)) {
     PrimFuncNode* fptr = f.CopyOnWrite();
@@ -665,8 +674,8 @@ PrimFunc CompactBufferAllocation(PrimFunc f) {
     std::tie(region, block_predicate_with_annotations) = BufferAccessRegionCollector::Collect(f);
     std::unordered_map<Buffer, StorageAlignAnnotation, ObjectPtrHash, ObjectPtrEqual>
         storage_align = StorageAlignCollector::Collect(f);
-    fptr->body = BufferCompactor::Compact(f, region, std::move(block_predicate_with_annotations),
-                                          storage_align);
+    fptr->body = BufferCompactor::Compact(
+        f, region, storage_align, std::move(block_predicate_with_annotations), enable_local_pad);
     return f;
   } else {
     return f;
@@ -675,9 +684,9 @@ PrimFunc CompactBufferAllocation(PrimFunc f) {
 
 namespace transform {
 
-Pass CompactBufferAllocation() {
+Pass CompactBufferAllocation(bool enable_local_pad) {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    return CompactBufferAllocation(std::move(f));
+    return CompactBufferAllocation(std::move(f), enable_local_pad);
   };
   return CreatePrimFuncPass(pass_func, 0, "tir.CompactBufferAllocation", {});
 }

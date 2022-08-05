@@ -159,8 +159,7 @@ class Vectorizer : public StmtMutator, public ExprFunctor<PrimExpr(const PrimExp
   using ExprFunctor::VisitExpr;
   using StmtMutator::operator();
 
-  Vectorizer(Var var, int var_lanes, const bool enabled_local_padding)
-      : var_(var), var_lanes_(var_lanes), enabled_local_padding_(enabled_local_padding) {
+  Vectorizer(Var var, int var_lanes) : var_(var), var_lanes_(var_lanes) {
     ramp_ = Ramp(IntImm(var->dtype, 0), IntImm(var->dtype, 1), var_lanes);
   }
 
@@ -427,7 +426,7 @@ class Vectorizer : public StmtMutator, public ExprFunctor<PrimExpr(const PrimExp
   // BufferStore
   Stmt VisitStmt_(const BufferStoreNode* op) final {
     // Unroll the vectorized loops in the case when local padding was applied.
-    if (enabled_local_padding_ && op->value.as<SelectNode>() != nullptr) {
+    if (op->value.as<SelectNode>() != nullptr) {
       need_scalarize_ = true;
       return StmtMutator::VisitStmt_(op);
     }
@@ -593,8 +592,6 @@ class Vectorizer : public StmtMutator, public ExprFunctor<PrimExpr(const PrimExp
   Var var_;
   // the lanes.
   int var_lanes_;
-  // whether local padding has been previously enabled
-  const bool enabled_local_padding_;
   // ramp representing the var.
   PrimExpr ramp_;
   // flag to mark requirment of scalarization.
@@ -666,8 +663,6 @@ class Vectorizer : public StmtMutator, public ExprFunctor<PrimExpr(const PrimExp
 
 class LoopVectorizer : public StmtMutator {
  public:
-  explicit LoopVectorizer(const bool enabled_local_padding = false)
-      : enabled_local_padding_(enabled_local_padding) {}
   Stmt VisitStmt_(const ForNode* op) final {
     if (op->kind == ForKind::kVectorized) {
       ICHECK(is_zero(op->min));
@@ -675,15 +670,11 @@ class LoopVectorizer : public StmtMutator {
       if (!extent_as_int || extent_as_int->value < 1) {
         LOG(FATAL) << "Failed to vectorize loop with extent " << op->extent;
       }
-      return Vectorizer(op->loop_var, static_cast<int>(extent_as_int->value),
-                        enabled_local_padding_)(op->body);
+      return Vectorizer(op->loop_var, static_cast<int>(extent_as_int->value))(op->body);
     } else {
       return StmtMutator::VisitStmt_(op);
     }
   }
-
- private:
-  const bool enabled_local_padding_;
 };
 
 Stmt VectorizeLoop(Stmt stmt) { return LoopVectorizer()(std::move(stmt)); }
@@ -706,11 +697,11 @@ Stmt SkipVectorize(Stmt stmt) { return VectorizeSkipper()(std::move(stmt)); }
 namespace transform {
 
 // TODO(tvm-team): Make it as a target property.
-Pass VectorizeLoop(bool enable_vectorize, bool enable_local_pad) {
+Pass VectorizeLoop(bool enable_vectorize) {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     auto* n = f.CopyOnWrite();
     if (enable_vectorize) {
-      n->body = LoopVectorizer(enable_local_pad)(std::move(n->body));
+      n->body = LoopVectorizer()(std::move(n->body));
     } else {
       n->body = VectorizeSkipper()(std::move(n->body));
     }

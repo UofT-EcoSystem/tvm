@@ -159,14 +159,14 @@ class MatMulNNExpectedModule:
     # fmt: on
 
 
-def preprocess(mod):
+def preprocess(mod, enable_local_pad):
     """
     Pre-process the IRModule by lowering the BlockScope's.
     """
     mod = LowerInitBlock()(mod)
     mod = PlanAndUpdateBufferAllocationLocation()(mod)
     mod = ConvertBlocksToOpaque()(mod)
-    mod = CompactBufferAllocation()(mod)
+    mod = CompactBufferAllocation(enable_local_pad)(mod)
     mod = Simplify()(mod)
     return mod
 
@@ -187,13 +187,11 @@ def test_dense_local_padding():
     """
     # The workload is deliberately selected so that it does not fit into the sample schedule.
     mod = MatMulNNOriginalModule
-    mod = preprocess(mod)
+    mod = preprocess(mod, True)
     mod = LocalPad(True)(mod)
-    mod = VectorizeLoop(False, True)(mod)
-    mod = postprocess(mod)
     print(mod)
     expected_mod = MatMulNNExpectedModule
-    expected_mod = preprocess(expected_mod)
+    expected_mod = preprocess(expected_mod, False)
     # tvm.ir.assert_structural_equal(postprocess(mod), postprocess(expected_mod))
 
 
