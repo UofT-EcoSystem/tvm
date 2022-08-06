@@ -127,7 +127,7 @@ TVM_DLL Pass LoopPartition();
 /*!
  * \brief Lower vectorization loops.
  *
- * \param enable_vectorize  Whether vectorization is enabled.
+ * \param enable_vectorize Whether vectorization is enabled.
  *
  * \return The pass.
  */

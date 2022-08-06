@@ -425,11 +425,6 @@ class Vectorizer : public StmtMutator, public ExprFunctor<PrimExpr(const PrimExp
   }
   // BufferStore
   Stmt VisitStmt_(const BufferStoreNode* op) final {
-    // Unroll the vectorized loops in the case when local padding was applied.
-    if (op->value.as<SelectNode>() != nullptr) {
-      need_scalarize_ = true;
-      return StmtMutator::VisitStmt_(op);
-    }
     auto store = GetRef<BufferStore>(op);
 
     auto fmutate = [this](const PrimExpr& index) { return this->VisitExpr(index); };
