@@ -153,7 +153,7 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
 
 class LocalPadder : public StmtExprMutator {
  public:
-  LocalPadder(std::vector<BlockRealize>&& block_realizes)
+  explicit LocalPadder(std::vector<BlockRealize>&& block_realizes)
       : block_realizes_(std::move(block_realizes)) {}
 
  private:
