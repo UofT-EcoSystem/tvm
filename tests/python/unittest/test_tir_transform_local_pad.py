@@ -183,6 +183,7 @@ def postprocess(mod):
     return mod
 
 
+@tvm.testing.requires_cuda
 def test_dense_local_padding():
     """
     Test that local padding is delivering the correct compute outcome.
