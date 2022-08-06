@@ -24,7 +24,10 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <algorithm>
 #include <array>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -34,6 +37,10 @@
 namespace tvm {
 namespace tir {
 namespace transform {
+
+using BufferRegionSet = std::unordered_set<BufferRegion, ObjectPtrHash, ObjectPtrEqual>;
+template <typename ValueType>
+using BlockRealizeMap = std::unordered_map<BlockRealize, ValueType, ObjectPtrHash, ObjectPtrEqual>;
 
 /*!
  * \brief Analyze the read and write accesses of the body statements, used by `LocalPadder`.
@@ -45,11 +52,9 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
 
   void VisitExpr_(const VarNode* op) final {
     if (rw_mode_ == RWMode::kRead) {
-      read_vars_.insert(op);
       read_marker_.SetStorageAccessMarker(GetRef<Var>(op));
     }
     if (rw_mode_ == RWMode::kWrite) {
-      write_vars_.insert(op);
       write_marker_.SetStorageAccessMarker(GetRef<Var>(op));
     }
   }
@@ -127,7 +132,6 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
   };
   RWMode rw_mode_;
   AccessMarker read_marker_, write_marker_;
-  std::multiset<const VarNode*> read_vars_, write_vars_;
   std::pair<AccessMarker, AccessMarker> Analyze(const BlockRealizeNode* op) {
     {
       With<ReadScope> read_scope(this);
@@ -143,16 +147,14 @@ class StorageAccessAnalyzer : public StmtExprVisitor {
     }
     return std::make_pair(read_marker_, write_marker_);
   }
-  std::multiset<const BlockRealizeNode*> GetConsumers(
-      const VarNode* var, const std::multiset<const BlockRealizeNode*>& blocks) {}
 
   friend class LocalPadder;
 };
 
 class LocalPadder : public StmtExprMutator {
  public:
-  LocalPadder(std::unordered_set<BlockRealize, ObjectPtrHash, ObjectPtrEqual>&& blocks)
-      : blocks_(std::move(blocks)) {}
+  LocalPadder(std::vector<BlockRealize>&& block_realizes)
+      : block_realizes_(std::move(block_realizes)) {}
 
  private:
   Stmt VisitStmt_(const BlockRealizeNode* op) final {
@@ -178,145 +180,197 @@ class LocalPadder : public StmtExprMutator {
     //
     //     a1 < c1 && a2 < c2 ...
     std::vector<PrimExpr> predicates = DecomposePredicate(op->predicate);
+    std::vector<PrimExpr> residual_subexprs;
 
-    std::vector<size_t> removable_indices;
-    std::vector<size_t> inlinable_indices;
-    std::vector<size_t> residual_indices;
+    BlockRealize ret = Downcast<BlockRealize>(StmtExprMutator::VisitStmt_(op));
 
-    if (write_marker.OnlyLocalAccesses()) {
-      // No memory reads but only local writes, common pattern for initialization.
-      //
-      //    A_local[local_index] = 0.f;
-      for (size_t i = 0; i < predicates.size(); ++i) {
-        // In order to prove that `predicate` is directly removable, we have to show that if it is
-        // evaluated to false, the same local memory location will be rejected by the one that is
-        // structurally similar in the write-back block anyway.
-        const PrimExpr& predicate = predicates[i];
+    for (size_t i = 0; i < predicates.size(); ++i) {
+      // In order to prove that `predicate` is directly removable, we have to show that if it is
+      // evaluated to false, the same local memory location will be rejected by the one that is
+      // structurally similar in the write-back block anyway.
+      PrimExpr predicate = predicates[i];
 
-        // bool predicate_is_removable = true;
-        // for (const BlockRealizeNode* block : blocks_) {
-        // }
-      }  // for (i in [0, predicates.size()))
-    }    // if (write_marker.OnlyLocalAccesses())
+      bool affect_region_size = false;
+      // If the predicate sub-expression has been marked as affecting the region size by the
+      // `CompactBufferRegion` pass, mark it as not removable.
+      if (const CallNode* op = predicate.as<CallNode>()) {
+        if (op->op.same_as(builtin::affect_region_size())) {
+          affect_region_size = true;
+          predicate = op->args[0];
+        }
+      }
+      if ((!write_marker.OnlyLocalAccesses()) || affect_region_size) {
+        residual_subexprs.push_back(predicate);
+        continue;
+      }
 
-    return StmtExprMutator::VisitStmt_(op);
+      // For each write buffer, get all of its consumers. In order to directly remove the predicate,
+      // it is requested that all predicates should share the same guard.
+      bool all_writes_are_guarded = true;
+      for (const BufferRegion& write_buffer : op->block->writes) {
+        bool all_consumers_have_same_predicate = true;
+        for (const std::pair<BlockRealize, BufferRegionSet>& consumer_reads_pair :
+             GetConsumers(GetRef<BlockRealize>(op), write_buffer)) {
+          const BlockRealize& consumer = consumer_reads_pair.first;
+          const BufferRegionSet& reads = consumer_reads_pair.second;
+          bool consumer_has_same_predicate = false;
+
+          CHECK(!reads.empty());
+          if (reads.size() > 1) {
+            // Unable to check the equivalence relationship in the case of multiple consumers.
+            break;
+          }
+
+          for (PrimExpr consumer_predicate : DecomposePredicate(consumer->predicate)) {
+            if (const CallNode* op = predicate.as<CallNode>()) {
+              if (op->op.same_as(builtin::affect_region_size())) {
+                consumer_predicate = op->args[0];
+              }
+            }
+            if (CheckPredicateEquivalence(predicate, write_buffer, consumer_predicate,
+                                          *reads.begin())) {
+              consumer_has_same_predicate = true;
+              break;
+            }
+          }  // for (consumer_predicate in DecomposePredicate(consumer->predicate))
+          all_consumers_have_same_predicate &= consumer_has_same_predicate;
+        }  // for (consumer in GetConsumers(write_buffer))
+        all_writes_are_guarded &= all_consumers_have_same_predicate;
+      }  // for (write_buffer in op->block->writes)
+
+      if (!all_writes_are_guarded) {
+        residual_subexprs.push_back(predicate);
+      }
+    }  // for (i in [0, predicates.size()))
+    if (residual_subexprs.empty()) {
+      return BlockRealize(ret->iter_values, Bool(1), ret->block);
+    }
+    return BlockRealize(ret->iter_values, FlattenPredicateSubExprs(residual_subexprs), ret->block);
   }
 
-  std::unordered_set<BlockRealize, ObjectPtrHash, ObjectPtrEqual> blocks_;
-  // Stmt VisitStmt_(const IfThenElseNode* op) final {
-  //   if (!is_no_op(op->else_case)) {
-  //     return StmtExprMutator::VisitStmt_(op);
-  //   }
-  //   // Analyze the reads and writes of the body statements.
-  //   StorageAccessAnalyzer::AccessMarker read_marker, write_marker;
-  //   std::tie(read_marker, write_marker) = StorageAccessAnalyzer().Analyze(op->then_case);
+  /*! \brief Get all consumers of a buffer. */
+  BlockRealizeMap<BufferRegionSet> GetConsumers(const BlockRealize& this_block,
+                                                const BufferRegion& buffer_region) const {
+    BlockRealizeMap<BufferRegionSet> consumers;
+    bool this_block_encountered = false;
+    for (const BlockRealize& block_realize : block_realizes_) {
+      if (block_realize.same_as(this_block)) {
+        this_block_encountered = true;
+        continue;
+      }
+      if (!this_block_encountered || !IsLeafBlock(block_realize)) {
+        continue;
+      }
+      for (const BufferRegion& read_buffer : block_realize->block->reads) {
+        if (read_buffer->buffer->data.same_as(buffer_region->buffer->data)) {
+          consumers[block_realize].insert(read_buffer);
+        }
+      }
+    }
+    return consumers;
+  }
 
-  //   // Remove and/or Inline the predicates, while preserving the correctness, where by "inline",
-  //   we
-  //   // refer to the following transformation:
-  //   //
-  //   //    if (predicate) A = ...;
-  //   //    |
-  //   //    A = predicate ? ... : init_constexpr;
-  //   //
-  //   // and by "correctness", we refer to:
-  //   // - The padded value does not affect the computed results in the global memory.
-  //   // - There is no out-of-boundary accesses.
-  //   // - There is no race condition.
+  /*! \brief Check whether a block is a leaf block or not. */
+  bool IsLeafBlock(const BlockRealize& this_block) const {
+    bool is_leaf_block = true;
+    PostOrderVisit(this_block->block->body, [&is_leaf_block](const ObjectRef& obj_ref) {
+      if (!is_leaf_block) {
+        return;
+      }
+      if (obj_ref.as<BlockRealizeNode>()) {
+        is_leaf_block = false;
+        return;
+      }
+    });
+    return is_leaf_block;
+  }
 
-  //   // First, decompose the condition. Since a predicate is usually in the form of
-  //   //
-  //   //     a1 < c1 && a2 < c2 ...
-  //   std::vector<PrimExpr> predicates = DecomposeCondition(op->condition);
+  /*!
+   * \brief Reverse the addition order. Imagine that we have an array `A[a, b, c]`. In most cases,
+   *        the predicate is in the form of `(a * B + b * C) + c`. However, we would like it to be
+   *        in the format of `a * B + (b * C + c)` for better substitution.
+   */
+  class ReassociateAdd : public ExprMutator {
+   public:
+    static PrimExpr Mutate(const PrimExpr& expr) {
+      ReassociateAdd mutator;
+      PrimExpr ret = expr;
+      do {
+        mutator.changed_ = false;
+        ret = mutator(ret);
+      } while (mutator.changed_);
+      return ret;
+    }
 
-  //   if (read_marker.NoAccesses() && write_marker.OnlyLocalAccesses()) {
-  //     //
+   private:
+    PrimExpr VisitExpr_(const AddNode* op) final {
+      if (const AddNode* lhs = op->a.as<AddNode>()) {
+        changed_ = true;
+        return Add(ExprMutator::VisitExpr(lhs->a),
+                   Add(ExprMutator::VisitExpr(lhs->b), ExprMutator::VisitExpr(op->b)));
+      }
+      return ExprMutator::VisitExpr_(op);
+    }
+    bool changed_ = false;
+  };
 
-  //   } else if (read_marker.OnlyGlobalAccesses() && write_marker.OnlyLocalOrSharedAccesses()) {
-  //     // if (!init_checker_.init_constexpr_) {
-  //     //   return StmtExprMutator::VisitStmt_(op);
-  //     // }
-  //     // In the case when there are global buffer reads and local/shared buffer writes, inline
-  //     the
-  //     // predicates as part of the buffer store statements.
-  //     // PredicateInliner predicate_inliner(op->then_case);
-  //     predicate_inliner(op->condition);
-  //     size_t predicate_stack_current_size = predicate_stack_.size();
-  //     // Push the inlinable predicates on top of the stack.
-  //     if (!predicate_inliner.inlinable_predicates_.empty()) {
-  //       predicate_stack_.insert(predicate_stack_.end(),
-  //                               predicate_inliner.inlinable_predicates_.begin(),
-  //                               predicate_inliner.inlinable_predicates_.end());
-  //     }
+  class ExprSubstitutor : public ExprMutator {
+   public:
+    explicit ExprSubstitutor(const Map<PrimExpr, PrimExpr>& expr_substitute_map)
+        : expr_substitute_map_(expr_substitute_map) {}
 
-  //     enable_padding_ = true;
-  //     // Update the body statements by inlining the predicates.
-  //     Stmt inlined_body_stmt = VisitStmt(op->then_case);
-  //     enable_padding_ = false;
+    PrimExpr VisitExpr(const PrimExpr& expr) final {
+      PrimExpr ret = ExprMutator::VisitExpr(expr);
+      for (const std::pair<const PrimExpr, PrimExpr> kv : expr_substitute_map_) {
+        if (StructuralEqual()(kv.first, ret)) {
+          return kv.second;
+        }
+      }
+      return ret;
+    }
 
-  //     if (!predicate_inliner.inlinable_predicates_.empty()) {
-  //       predicate_stack_.erase(predicate_stack_.begin() + predicate_stack_current_size,
-  //                              predicate_stack_.end());
-  //     }
-  //     if (predicate_inliner.non_inlinable_residuals_.empty()) {
-  //       return inlined_body_stmt;
-  //     }
-  //     return IfThenElse(FlattenPredicates(predicate_inliner.non_inlinable_residuals_),
-  //                       inlined_body_stmt);
-  //   } else if (read_marker.OnlyLocalOrSharedAccesses() &&
-  //              write_marker.OnlyLocalOrSharedAccesses()) {
-  //     // In the case when there are global buffer reads and local/shared buffer writes, remove
-  //     the
-  //     // predicates.
-  //     return StmtExprMutator::VisitStmt(op->then_case);
-  //   }
-  //   return StmtExprMutator::VisitStmt_(op);
-  // }
-  // Stmt VisitStmt_(const BufferStoreNode* op) final {
-  //   if (!enable_padding_ || predicate_stack_.empty()) {
-  //     return StmtExprMutator::VisitStmt_(op);
-  //   }
-  //   PrimExpr store_predicate = FlattenPredicates(predicate_stack_);
-  //   return BufferStore(op->buffer,
-  //                      Select(store_predicate, op->value, ComposePaddedValue(op->value->dtype)),
-  //                      op->indices);
-  // }
-  // std::vector<PrimExpr> DecomposeCondition(const PrimExpr& cond) const {
-  //   std::vector<PrimExpr> predicates;
-  //   std::function<void(const PrimExpr&)> visit_expr = [&predicates,
-  //                                                      visit_expr](const PrimExpr& cond) {
-  //     if (const AndNode* op = cond.as<AndNode>()) {
-  //       visit_expr(op->a);
-  //       visit_expr(op->b);
-  //     }
-  //     predicates.push_back(cond);
-  //   };
-  //   return predicates;
-  // }
-  // PrimExpr FlattenPredicates(const Array<PrimExpr>& predicates) const {
-  //   CHECK(!predicates.empty());
-  //   PrimExpr ret = predicates.front();
-  //   for (auto predicates_it = predicates.begin() + 1; predicates_it != predicates.end();
-  //        ++predicates_it) {
-  //     ret = ret && (*predicates_it);
-  //   }
-  //   return ret;
-  // }
+   private:
+    Map<PrimExpr, PrimExpr> expr_substitute_map_;
+  };
 
-  // bool init_verified_by_outer_stmts_ = false;
-  // std::vector<PrimExpr> predicate_stack_;
-  // bool enable_padding_ = false;
+  /**
+   * \brief Check the equivalence relationship between the producer and the consumer predicate by
+   *        substituting the read indices of the latter with the write indices.
+   *
+   */
+  bool CheckPredicateEquivalence(const PrimExpr& write_predicate,
+                                 const BufferRegion& write_buffer_region,
+                                 const PrimExpr& read_predicate,
+                                 const BufferRegion& read_buffer_region) {
+    if (write_buffer_region->region.size() != read_buffer_region->region.size()) {
+      return false;
+    }
+    Map<PrimExpr, PrimExpr> substitute_map;
+    for (size_t region_idx = 0; region_idx < write_buffer_region->region.size(); ++region_idx) {
+      Range write_range = write_buffer_region->region[region_idx];
+      Range read_range = read_buffer_region->region[region_idx];
+      if (!StructuralEqual()(write_range->extent, read_range->extent)) {
+        return false;
+      }
+      substitute_map.Set(read_range->min, write_range->min);
+    }
+    return StructuralEqual()(
+        ReassociateAdd::Mutate(write_predicate),
+        ExprSubstitutor(substitute_map)(ReassociateAdd::Mutate(read_predicate)));
+  }
+  std::vector<BlockRealize> block_realizes_;
 };
 
 Stmt LocalPadTransform(Stmt stmt) {
   // Record all the blocks, used for tracing producer-consumer relationship.
-  std::unordered_set<BlockRealize, ObjectPtrHash, ObjectPtrEqual> blocks;
-  PostOrderVisit(stmt, [&blocks](const ObjectRef& obj_ref) {
+  std::vector<BlockRealize> block_realizes_rev_post_order;
+  PreOrderVisit(stmt, [&block_realizes_rev_post_order](const ObjectRef& obj_ref) -> bool {
     if (const BlockRealizeNode* op = obj_ref.as<BlockRealizeNode>()) {
-      blocks.insert(GetRef<BlockRealize>(op));
+      block_realizes_rev_post_order.push_back(GetRef<BlockRealize>(op));
     }
+    return true;
   });
-  LocalPadder local_padder(std::move(blocks));
+  LocalPadder local_padder(std::move(block_realizes_rev_post_order));
   stmt = local_padder(std::move(stmt));
   return stmt;
 }

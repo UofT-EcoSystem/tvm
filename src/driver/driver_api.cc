@@ -202,6 +202,7 @@ Array<tvm::transform::Pass> CreatePassList(bool simple_mode) {
   pass_list.push_back(tir::transform::ConvertBlocksToOpaque());
   pass_list.push_back(tir::transform::UnifyThreadBinding());
   pass_list.push_back(tir::transform::CompactBufferAllocation(enable_local_pad));
+  pass_list.push_back(tir::transform::LocalPad(enable_local_pad));
   pass_list.push_back(tir::transform::LowerMatchBuffer());
   pass_list.push_back(tir::transform::InjectSoftwarePipeline());
   pass_list.push_back(tir::transform::FlattenBuffer());
@@ -215,7 +216,6 @@ Array<tvm::transform::Pass> CreatePassList(bool simple_mode) {
 
   // PHASE 2
   if (!simple_mode) {
-    pass_list.push_back(tir::transform::LocalPad(enable_local_pad));
     pass_list.push_back(tir::transform::LoopPartition());
   }
 

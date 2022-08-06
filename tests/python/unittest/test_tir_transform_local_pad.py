@@ -121,29 +121,30 @@ class MatMulNNExpectedModule:
                     for k_0 in T.serial(193):
                         for ax0_ax1_fused_0 in T.serial(1):
                             for ax0_ax1_fused_1 in T.thread_binding(256, thread="threadIdx.x"):
-                                for ax0_ax1_fused_2 in T.serial(3):
+                                for ax0_ax1_fused_2 in T.vectorized(3):
                                     with T.block("A_shared"):
                                         v0 = T.axis.spatial(960, i_0_j_0_fused // 18 * 128 + (ax0_ax1_fused_0 * 768 + ax0_ax1_fused_1 * 3 + ax0_ax1_fused_2) // 4)
                                         v1 = T.axis.spatial(770, k_0 * 4 + (ax0_ax1_fused_0 * 768 + ax0_ax1_fused_1 * 3 + ax0_ax1_fused_2) % 4)
-                                        T.where((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 3 + ax0_ax1_fused_2 < 512)
+                                        T.where(i_0_j_0_fused // 18 * 128 + ((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 3 + ax0_ax1_fused_2) // 4 < 960 and k_0 * 4 + ((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 3 + ax0_ax1_fused_2) % 4 < 770 and (ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 3 + ax0_ax1_fused_2 < 512)
                                         T.reads(A[v0, v1])
                                         T.writes(A_shared[v0, v1])
-                                        A_shared[v0, v1] = T.Select(i_0_j_0_fused // 18 * 128 + ((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 3 + ax0_ax1_fused_2) // 4 < 960 and k_0 * 4 + ((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 3 + ax0_ax1_fused_2) % 4 < 770, A[v0, v1], 0.)
+                                        A_shared[v0, v1] = A[v0, v1]
                         for ax0_ax1_fused_0 in T.serial(1):
                             for ax0_ax1_fused_1 in T.thread_binding(256, thread="threadIdx.x"):
-                                for ax0_ax1_fused_2 in T.serial(4):
+                                for ax0_ax1_fused_2 in T.vectorized(4):
                                     with T.block("B_shared"):
                                         v0 = T.axis.spatial(770, k_0 * 4 + (ax0_ax1_fused_0 * 1024 + ax0_ax1_fused_1 * 4 + ax0_ax1_fused_2) // 128)
                                         v1 = T.axis.spatial(2304, i_0_j_0_fused % 18 * 128 + (ax0_ax1_fused_0 * 1024 + ax0_ax1_fused_1 * 4 + ax0_ax1_fused_2) % 128)
-                                        T.where((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 4 + ax0_ax1_fused_2 < 512)
+                                        T.where(k_0 * 4 + ((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 4 + ax0_ax1_fused_2) // 128 < 770 and (ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 4 + ax0_ax1_fused_2 < 512)
                                         T.reads(B[v0, v1])
                                         T.writes(B_shared[v0, v1])
-                                        B_shared[v0, v1] = T.Select(k_0 * 4 + ((ax0_ax1_fused_0 * 256 + ax0_ax1_fused_1) * 4 + ax0_ax1_fused_2) // 128 < 770, B[v0, v1], 0.)
+                                        B_shared[v0, v1] = B[v0, v1]
                         for k_1, i_3, j_3, k_2, i_4, j_4 in T.grid(1, 8, 1, 4, 2, 2):
                             with T.block("update_update"):
                                 vi = T.axis.spatial(960, (((i_0_j_0_fused // 18 + 0) * 8 + i_2_j_2_fused // 32) * 8 + i_3) * 2 + i_4)
                                 vj = T.axis.spatial(2304, ((i_0_j_0_fused % 18 * 2 + i_1_j_1_fused % 2) * 32 + i_2_j_2_fused % 32 + j_3) * 2 + j_4)
                                 vk = T.axis.reduce(770, (k_0 + k_1) * 4 + k_2)
+                                T.where((k_0 + k_1) * 4 + k_2 < 770)
                                 T.reads(C_local[vi, vj], A_shared[vi, vk], B_shared[vk, vj])
                                 T.writes(C_local[vi, vj])
                                 C_local[vi, vj] = C_local[vi, vj] + A_shared[vi, vk] * B_shared[vk, vj]
@@ -176,6 +177,7 @@ def postprocess(mod):
     Post-process the IRModule. This is to ensure that the shared memory variables are ordered.
     """
     mod = FlattenBuffer()(mod)
+    mod = VectorizeLoop(True)(mod)
     mod = InjectVirtualThread()(mod)
     mod = StorageRewrite()(mod)
     return mod
@@ -189,10 +191,9 @@ def test_dense_local_padding():
     mod = MatMulNNOriginalModule
     mod = preprocess(mod, True)
     mod = LocalPad(True)(mod)
-    print(mod)
     expected_mod = MatMulNNExpectedModule
     expected_mod = preprocess(expected_mod, False)
-    # tvm.ir.assert_structural_equal(postprocess(mod), postprocess(expected_mod))
+    tvm.ir.assert_structural_equal(postprocess(mod), postprocess(expected_mod))
 
 
 if __name__ == "__main__":

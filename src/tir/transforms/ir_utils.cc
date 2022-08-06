@@ -460,7 +460,7 @@ std::vector<PrimExpr> DecomposePredicate(const PrimExpr& predicate) {
 PrimExpr FlattenPredicateSubExprs(const Array<PrimExpr>& predicate_subexprs, const int ignore_idx) {
   CHECK(!predicate_subexprs.empty());
   PrimExpr ret = predicate_subexprs.front();
-  for (size_t subexpr_idx = 0; subexpr_idx < predicate_subexprs.size(); ++subexpr_idx) {
+  for (size_t subexpr_idx = 1; subexpr_idx < predicate_subexprs.size(); ++subexpr_idx) {
     if (subexpr_idx == static_cast<size_t>(ignore_idx)) {
       continue;
     }
