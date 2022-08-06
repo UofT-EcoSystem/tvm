@@ -205,6 +205,7 @@ Array<tvm::transform::Pass> CreatePassList(bool simple_mode) {
   pass_list.push_back(tir::transform::LocalPad(enable_local_pad));
   pass_list.push_back(tir::transform::LowerMatchBuffer());
   pass_list.push_back(tir::transform::InjectSoftwarePipeline());
+  pass_list.push_back(tir::transform::LowerOpaqueBlock());
   pass_list.push_back(tir::transform::FlattenBuffer());
   pass_list.push_back(tir::transform::LowerVtcmAlloc());
   pass_list.push_back(tir::transform::BF16Legalize());

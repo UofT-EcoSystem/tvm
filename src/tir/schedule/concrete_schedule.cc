@@ -452,6 +452,9 @@ Array<LoopRV> ConcreteScheduleNode::Split(const LoopRV& loop_rv,
       if (is_const_int(factor) && !is_positive_const(factor)) {
         throw NonPositiveFactorError(state_->mod, factor.as<IntImmNode>()->value, i);
       }
+      if (factor.dtype().bits() > loop->extent.dtype().bits()) {
+        factor = cast(loop->extent.dtype(), factor);
+      }
       factors.push_back(factor);
       tot_length *= factor;
     }
@@ -759,6 +762,15 @@ void ConcreteScheduleNode::SetAxisSeparator(const BlockRV& block_rv, int buffer_
                         axis_separators);
   TVM_TIR_SCHEDULE_END("set-axis-separator", this->error_render_level_);
   this->state_->DebugVerify();
+}
+
+BlockRV ConcreteScheduleNode::DecomposePadding(const BlockRV& block_rv, const LoopRV& loop_rv) {
+  StmtSRef result{nullptr};
+  TVM_TIR_SCHEDULE_BEGIN();
+  result = tir::DecomposePadding(state_, this->GetSRef(block_rv), this->GetSRef(loop_rv));
+  TVM_TIR_SCHEDULE_END("decompose-padding", this->error_render_level_);
+  this->state_->DebugVerify();
+  return CreateRV<BlockRV>(result);
 }
 
 /******** Schedule: Misc ********/
