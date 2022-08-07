@@ -19,6 +19,8 @@ from tvm.script import tir as T
 import tvm.testing
 from tvm.tir.transform.transform import (
     LowerInitBlock,
+    LowerMatchBuffer,
+    LowerOpaqueBlock,
     PlanAndUpdateBufferAllocationLocation,
     ConvertBlocksToOpaque,
     CompactBufferAllocation,
@@ -176,8 +178,11 @@ def postprocess(mod):
     """
     Post-process the IRModule. This is to ensure that the shared memory variables are ordered.
     """
+    mod = LowerMatchBuffer()(mod)
+    mod = LowerOpaqueBlock()(mod)
+    mod = Simplify()(mod)
     mod = FlattenBuffer()(mod)
-    mod = VectorizeLoop(True)(mod)
+    mod = VectorizeLoop()(mod)
     mod = InjectVirtualThread()(mod)
     mod = StorageRewrite()(mod)
     return mod
